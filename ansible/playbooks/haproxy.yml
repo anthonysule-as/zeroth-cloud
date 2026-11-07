@@ -1,0 +1,170 @@
+---
+# =============================================================================
+# Zeroth Cloud v3 — HAProxy + Keepalived Playbook
+# =============================================================================
+# Deploys HAProxy on both DC sites with Keepalived providing a floating VIP.
+#
+# Traffic routing:
+#   - Wazuh agent events (1514) + enrollment (1515) → shared Wazuh managers
+#     (leastconn balancing — dedicated managers are reached directly, not pooled)
+#   - Site A HAProxy (MASTER): holds the VIP under normal operation
+#   - Site B HAProxy (BACKUP): takes over the VIP if Site A goes down
+#
+# Scaling: adding a new shared Wazuh manager is a single 'server' line
+# addition followed by 'systemctl reload haproxy' — zero downtime.
+# =============================================================================
+
+- name: Deploy HAProxy + Keepalived
+  hosts: haproxy
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+    - ../group_vars/haproxy/vars.yml
+
+  tasks:
+
+    - name: Install HAProxy and Keepalived
+      apt:
+        name:
+          - haproxy
+          - keepalived
+          - rsyslog
+        state: present
+        update_cache: true
+
+    - name: Deploy HAProxy configuration
+      template:
+        src: ../templates/haproxy/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: '0644'
+        validate: haproxy -c -f %s
+      notify: Reload HAProxy
+
+    - name: Deploy Keepalived configuration
+      template:
+        src: ../templates/haproxy/keepalived.conf.j2
+        dest: /etc/keepalived/keepalived.conf
+        mode: '0644'
+      notify: Restart Keepalived
+
+    - name: Deploy HAProxy health check script
+      copy:
+        content: |
+          #!/bin/bash
+          # Used by Keepalived to check HAProxy health
+          systemctl is-active --quiet haproxy
+          exit $?
+        dest: /usr/local/bin/check_haproxy.sh
+        mode: '0755'
+
+    - name: Enable IP non-local bind (required for Keepalived VIP)
+      sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: "1"
+        state: present
+        reload: true
+
+    - name: Enable and start HAProxy
+      systemd:
+        name: haproxy
+        state: started
+        enabled: true
+
+    - name: Enable and start Keepalived
+      systemd:
+        name: keepalived
+        state: started
+        enabled: true
+
+    - name: Verify HAProxy is listening
+      wait_for:
+        port: "{{ item }}"
+        host: "0.0.0.0"
+        timeout: 30
+      loop:
+        - "{{ wazuh_manager_port }}"
+        - "{{ wazuh_registration_port }}"
+
+
+    - name: Print HAProxy stats URL
+      debug:
+        msg: "HAProxy stats available at http://{{ inventory_hostname }}:{{ haproxy_stats_port }}{{ haproxy_stats_uri }}"
+
+    # ── Host firewall (ingress host was found with ufw OFF, SSH internet-exposed) ──
+    # Lockout-safe order: allows FIRST, default-deny SECOND, enable LAST.
+    - name: HAProxy host firewall — allow SSH from overlay + jumpserver bridge
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item.ip }}"
+        port: "22"
+        proto: tcp
+        comment: "{{ item.c }}"
+      loop:
+        - { ip: "{{ wg_infra_subnet }}",   c: "SSH from infrastructure overlay" }
+        - { ip: "{{ wg_admin_subnet }}",   c: "SSH from admin clients" }
+        - { ip: "{{ controller_public_ip }}", c: "SSH from jumpserver (public bridge — overlay pending)" }
+
+    - name: HAProxy host firewall — allow VRRP protocol on eth0 (Keepalived)
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: eth0
+        proto: vrrp
+        comment: "VRRP protocol 112"
+
+    - name: HAProxy host firewall — allow VRRP multicast on eth0
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: eth0
+        to_ip: "<REDACTED_IP_92>"
+        comment: "VRRP multicast"
+
+    - name: HAProxy host firewall — default-deny incoming (after allows in place)
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    # --- security-assessor #16: node_exporter must not be readable by org subnets ---
+    - name: Restrict node_exporter (9100) to the monitoring host only
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_12>/32"
+        port: "9100"
+        proto: tcp
+        comment: "node_exporter — monitoring-01 scrape only"
+
+    - name: Remove stale /8 grant for node_exporter — tcp form (#16)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "9100"
+        proto: tcp
+        delete: true
+      failed_when: false
+
+    - name: Remove stale /8 grant for node_exporter — bare form (#16)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "9100"
+        delete: true
+      failed_when: false
+
+    - name: HAProxy host firewall — enable ufw
+      community.general.ufw:
+        state: enabled
+
+  handlers:
+
+    - name: Reload HAProxy
+      systemd:
+        name: haproxy
+        state: reloaded
+      # systemctl reload haproxy — graceful, zero connection drops
+
+    - name: Restart Keepalived
+      systemd:
+        name: keepalived
+        state: restarted

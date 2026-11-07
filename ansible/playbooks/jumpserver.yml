@@ -1,0 +1,124 @@
+---
+# NOTE ON DEPLOYMENT METHOD (2026-08-27)
+#
+# jumpserver-01 runs JumpServer v4.10.18-ce from the OFFICIAL INSTALLER, not the
+# compose stack defined further down this file:
+#   install dir : /opt/jumpserver-installer-v4.10.18/
+#   config      : /opt/jumpserver/config/config.txt   <- the authoritative config
+#   control     : ./jmsctl.sh {start|stop|restart}
+#
+# This playbook configures TLS and the port lockdown (security-assessor #13) against the
+# installer's layout. It does NOT install JumpServer — see the note below.
+
+# The compose-based install play that used to live here has been removed: it
+# deployed a hand-rolled stack that conflicted with the official installer
+# actually in use, and it failed on this host anyway (no outbound DNS).
+#
+# Installation is a documented manual step:
+#   curl -sSL https://github.com/jumpserver/installer/releases/download/<ver>/jumpserver-installer-<ver>.tar.gz | tar xz -C /opt
+#   cd /opt/jumpserver-installer-<ver> && ./jmsctl.sh install
+# This playbook then configures TLS and the port lockdown on top of it.
+
+- name: JumpServer TLS + lockdown
+  hosts: jumpserver
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+  vars:
+    jms_config: /opt/jumpserver/config/config.txt
+    jms_cert_dir: /opt/jumpserver/config/nginx/cert
+
+  tasks:
+    - name: Locate the JumpServer installer directory
+      ansible.builtin.find:
+        paths: /opt
+        patterns: "jumpserver-installer-*"
+        file_type: directory
+      register: jms_installer
+
+    - name: Fail clearly if the installer is missing
+      ansible.builtin.fail:
+        msg: "No /opt/jumpserver-installer-* found. Install JumpServer first; this play only configures it."
+      when: jms_installer.files | length == 0
+
+    - name: Ensure the nginx cert directory exists
+      ansible.builtin.file:
+        path: "{{ jms_cert_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate the JumpServer TLS key (if absent)
+      ansible.builtin.command:
+        cmd: openssl genrsa -out {{ jms_cert_dir }}/jumpserver.key 4096
+        creates: "{{ jms_cert_dir }}/jumpserver.key"
+
+    - name: Generate the JumpServer TLS certificate (if absent)
+      ansible.builtin.shell: |
+        cd {{ jms_cert_dir }}
+        printf 'subjectAltName=DNS:jumpserver-01,IP:{{ hostvars[inventory_hostname]["wg_overlay_ip"] }},IP:{{ hostvars[inventory_hostname]["ansible_host"] }},IP:127.0.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n' > san.ext
+        openssl req -new -key jumpserver.key -out jumpserver.csr \
+          -subj "/C=NG/O=Resilience Technologies/OU=Zeroth Cloud/CN=jumpserver-01"
+        openssl x509 -req -in jumpserver.csr -signkey jumpserver.key -sha256 \
+          -days 3650 -extfile san.ext -out jumpserver.pem
+        rm -f jumpserver.csr san.ext
+      args:
+        creates: "{{ jms_cert_dir }}/jumpserver.pem"
+
+    - name: Set cert permissions
+      ansible.builtin.file:
+        path: "{{ item.p }}"
+        mode: "{{ item.m }}"
+      loop:
+        - { p: "{{ jms_cert_dir }}/jumpserver.key", m: "0600" }
+        - { p: "{{ jms_cert_dir }}/jumpserver.pem", m: "0644" }
+
+    - name: Configure HTTPS and disable the plaintext listener
+      ansible.builtin.lineinfile:
+        path: "{{ jms_config }}"
+        regexp: "{{ item.re }}"
+        line: "{{ item.line }}"
+      loop:
+        - { re: '^#?\s*HTTP_PORT=',            line: 'HTTP_PORT=0' }
+        - { re: '^#?\s*HTTPS_PORT=',           line: 'HTTPS_PORT=8443' }
+        - { re: '^#?\s*USE_LB=',               line: 'USE_LB=1' }
+        - { re: '^#?\s*SERVER_NAME=',          line: 'SERVER_NAME=jumpserver-01' }
+        - { re: '^#?\s*SSL_CERTIFICATE=',      line: 'SSL_CERTIFICATE=jumpserver.pem' }
+        - { re: '^#?\s*SSL_CERTIFICATE_KEY=',  line: 'SSL_CERTIFICATE_KEY=jumpserver.key' }
+      notify: Restart JumpServer
+
+    - name: Deploy the 8443 lockdown script (Docker publishes past ufw)
+      ansible.builtin.copy:
+        src: ../files/firewall/zeroth-jumpserver-lockdown.sh
+        dest: /usr/local/sbin/zeroth-jumpserver-lockdown.sh
+        mode: "0755"
+
+    - name: Deploy the lockdown unit
+      ansible.builtin.copy:
+        src: ../files/firewall/zeroth-jumpserver-lockdown.service
+        dest: /etc/systemd/system/zeroth-jumpserver-lockdown.service
+        mode: "0644"
+
+    - name: Enable and run the lockdown
+      ansible.builtin.systemd:
+        name: zeroth-jumpserver-lockdown
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Allow 8443 from the overlay (defence in depth alongside the iptables drops)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item }}"
+        port: "8443"
+        proto: tcp
+        comment: "JumpServer web — overlay only"
+      loop:
+        - "{{ wg_infra_subnet | default('<REDACTED_IP_2>/24') }}"
+        - "{{ wg_admin_subnet | default('<REDACTED_IP_4>/24') }}"
+
+  handlers:
+    - name: Restart JumpServer
+      ansible.builtin.command:
+        cmd: ./jmsctl.sh restart
+        chdir: "{{ jms_installer.files[0].path }}"

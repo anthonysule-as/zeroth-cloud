@@ -1,0 +1,85 @@
+# Zeroth Cloud v3 — Prometheus Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# PUBLIC IP TOPOLOGY: All targets scraped via WireGuard overlay (10.0.0.x)
+
+global:
+  scrape_interval:     {{ prometheus_scrape_interval }}
+  evaluation_interval: {{ prometheus_scrape_interval }}
+  external_labels:
+    cluster: zeroth-cloud
+    environment: production
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:{{ alertmanager_port }}']
+
+scrape_configs:
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:{{ prometheus_port }}']
+
+  # ─── NODE EXPORTERS ────────────────────────────────────────────────────────
+  # All servers scraped via WireGuard overlay IPs — not public IPs.
+  # Node exporter is restricted to <REDACTED_IP_2>/8 by UFW post-WireGuard deploy.
+  - job_name: node_exporter
+    static_configs:
+      - targets:
+{% for host in groups['all'] %}
+{% if hostvars[host].wg_overlay_ip is defined %}
+          - '{{ hostvars[host]["wg_overlay_ip"] }}:9100'  # {{ host }}
+{% endif %}
+{% endfor %}
+
+  # ─── WAZUH MANAGERS ─────────────────────────────────────────────────────────
+  - job_name: wazuh_managers
+    static_configs:
+      - targets:
+{% for host in groups['wazuh_managers'] %}
+          - '{{ hostvars[host]["wg_overlay_ip"] }}:9200'  # {{ host }}
+{% endfor %}
+
+  # ─── OPENSEARCH ──────────────────────────────────────────────────────────────
+  - job_name: opensearch
+    metrics_path: /_prometheus/metrics
+    scheme: https
+    tls_config:
+      ca_file: /etc/zeroth/opensearch-ca.pem
+      insecure_skip_verify: false
+    basic_auth:
+      username: {{ vault_opensearch_admin_user }}
+      # Password lives in a 0600 file, not this world-readable config.
+      password_file: /etc/prometheus/secrets/opensearch.pw
+    static_configs:
+      - targets:
+{% for host in groups['opensearch'] %}
+          - '{{ hostvars[host]["wg_overlay_ip"] }}:{{ opensearch_http_port }}'  # {{ host }}
+{% endfor %}
+
+  # ─── HAPROXY ────────────────────────────────────────────────────────────────
+  - job_name: haproxy
+    static_configs:
+      - targets:
+{% for host in groups['haproxy'] %}
+          - '{{ hostvars[host]["wg_overlay_ip"] }}:{{ haproxy_stats_port }}'  # {{ host }}
+{% endfor %}
+
+  # ─── WIREGUARD GATEWAYS ──────────────────────────────────────────────────────
+  - job_name: wireguard
+    static_configs:
+      - targets:
+{% for host in groups['wireguard_gateways'] %}
+          - '{{ hostvars[host]["ansible_host"] }}:9586'  # {{ host }} (public IP — gateway)
+{% endfor %}
+
+  # ─── LLAMA INFERENCE ─────────────────────────────────────────────────────────
+  - job_name: llama_inference
+    static_configs:
+      - targets:
+{% for host in groups['llama'] %}
+          - '{{ hostvars[host]["wg_overlay_ip"] }}:{{ llama_port }}'  # {{ host }}
+{% endfor %}

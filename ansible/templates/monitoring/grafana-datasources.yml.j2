@@ -1,0 +1,41 @@
+# Zeroth Cloud v3 — Grafana Datasources Provisioning
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# One OpenSearch datasource per org, index-scoped for strict isolation.
+
+apiVersion: 1
+
+datasources:
+{% for org in zeroth_orgs %}
+  - name: zeroth-opensearch-{{ org.id }}
+    type: grafana-opensearch-datasource
+    uid: zeroth-opensearch-{{ org.id }}
+    access: proxy
+    url: https://{{ hostvars[groups['opensearch'][0]]['wg_overlay_ip'] }}:{{ opensearch_http_port }}
+    basicAuth: true
+    basicAuthUser: "{{ vault_opensearch_grafana_user }}"
+    isDefault: false
+    editable: false
+    jsonData:
+      database: "wazuh-alerts-{{ org.id }}-*"
+      flavor: opensearch
+      version: "2.13.0"
+      versionLabel: "OpenSearch 2.13.0"
+      timeField: timestamp
+      pplEnabled: true
+      maxConcurrentShardRequests: 5
+      tlsAuthWithCACert: true
+    secureJsonData:
+      basicAuthPassword: "{{ vault_opensearch_grafana_password }}"
+      tlsCACert: |
+{{ lookup('file', playbook_dir + '/../files/opensearch/root-ca.pem') | indent(8, true) }}
+{% endfor %}
+
+  - name: zeroth-prometheus
+    type: prometheus
+    uid: zeroth-prometheus
+    access: proxy
+    url: http://localhost:{{ prometheus_port }}
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: "{{ prometheus_scrape_interval }}"

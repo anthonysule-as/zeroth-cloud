@@ -1,0 +1,327 @@
+---
+# Zeroth Cloud v3 — WireGuard Dual Gateway Playbook
+# PUBLIC IP TOPOLOGY
+#
+# Both gateways are public-facing endpoints. Org clients list both as peers
+# and fail over automatically. Inter-server traffic uses the overlay.
+#
+# After this playbook runs:
+#   - All servers join the <REDACTED_IP_2>/8 overlay network
+#   - Service ports (OpenSearch, PostgreSQL, etc.) rebind to overlay IPs
+#   - UFW rules tighten: services restricted to <REDACTED_IP_2>/8 only
+#   - Tang becomes reachable on <REDACTED_IP_3> for LUKS unlock at boot
+
+- name: Deploy WireGuard Gateways (public endpoints + overlay)
+  hosts: wireguard_gateways
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install WireGuard tools
+      ansible.builtin.apt:
+        name: [wireguard, wireguard-tools, iptables-persistent]
+        state: present
+        update_cache: true
+
+    - name: Enable IPv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Enable IPv6 forwarding (disable — IPv4 only deployment)
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: "0"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Deploy WireGuard private key from vault
+      ansible.builtin.copy:
+        content: "{{ vault_wg_gateway_a_private_key if site == 'a' else vault_wg_gateway_b_private_key }}"
+        dest: /etc/wireguard/server_private.key
+        mode: "0600"
+        owner: root
+        group: root
+
+    - name: Deploy wg0.conf (gateway config + all enrolled org peers)
+      ansible.builtin.template:
+        src: ../templates/wireguard/wg0.conf.j2
+        dest: /etc/wireguard/wg0.conf
+        mode: "0600"
+        owner: root
+        group: root
+      notify: Reload WireGuard syncconf
+
+    - name: Enable and start WireGuard
+      ansible.builtin.systemd:
+        name: wg-quick@wg0
+        enabled: true
+        state: started
+
+    # NOTE: the gateways deliberately do NOT run ufw. Their firewall is
+    # zeroth-gateway-input.sh (deployed below), which owns the INPUT chain
+    # outright — including 51820/udp, SSH, node_exporter and ICMP scoping.
+    # Layering ufw on top is what produced unreachable rules elsewhere on the
+    # fleet: ufw's before.rules ACCEPTs echo-request ahead of any appended
+    # INPUT rule, so those rules never matched. One mechanism per host.
+
+    - name: Deploy per-org iptables isolation rules
+      ansible.builtin.template:
+        src: ../templates/wireguard/iptables-isolation.sh.j2
+        dest: /etc/wireguard/iptables-isolation.sh
+        mode: "0700"
+      notify: Apply iptables rules
+
+    - name: Install netfilter-persistent
+      ansible.builtin.apt:
+        name: [iptables-persistent, netfilter-persistent]
+        state: present
+
+    - name: Persist iptables rules on reboot
+      ansible.builtin.command: netfilter-persistent save
+      changed_when: false
+
+  handlers:
+    - name: Apply gateway INPUT firewall
+      ansible.builtin.systemd:
+        name: zeroth-gateway-input
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload WireGuard syncconf
+      ansible.builtin.shell: |
+        wg syncconf wg0 <(wg-quick strip wg0)
+      args:
+        executable: /bin/bash
+      # syncconf reloads peer list without dropping existing tunnels
+
+    - name: Apply iptables rules
+      ansible.builtin.command: bash /etc/wireguard/iptables-isolation.sh
+
+# ─── JOIN ALL OTHER SERVERS TO THE OVERLAY ────────────────────────────────────
+# Every server gets a WireGuard client config pointing at both gateways.
+# Once up, all inter-server traffic flows over <REDACTED_IP_2>/8.
+- name: Join all servers to WireGuard overlay
+  hosts: all:!wireguard_gateways
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install WireGuard
+      ansible.builtin.apt:
+        name: [wireguard, wireguard-tools]
+        state: present
+        update_cache: true
+
+    - name: Deploy per-server WireGuard client config
+      ansible.builtin.template:
+        src: ../templates/wireguard/wg-client.conf.j2
+        dest: /etc/wireguard/wg0.conf
+        mode: "0600"
+        owner: root
+        group: root
+      notify: Restart WireGuard client
+
+    - name: Enable and start WireGuard client
+      ansible.builtin.systemd:
+        name: wg-quick@wg0
+        enabled: true
+        state: started
+
+    - name: Tighten UFW — restrict service ports to WireGuard overlay only
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ item.port }}"
+        proto: tcp
+        comment: "{{ item.comment }} — overlay only"
+      loop:
+        - { port: "9200",  comment: "OpenSearch HTTP" }
+        - { port: "9300",  comment: "OpenSearch transport" }
+        - { port: "5432",  comment: "PostgreSQL" }
+        - { port: "9000",  comment: "TheHive" }
+        - { port: "9001",  comment: "Cortex" }
+        - { port: "3001",  comment: "Shuffle" }
+        - { port: "3000",  comment: "Grafana" }
+        - { port: "80",    comment: "Tang" }
+
+    # --- Gateway INPUT default-deny (no ufw on these hosts) ---
+    # Policy was ACCEPT with zero filtering; node_exporter was internet-reachable.
+    # The script adds every ACCEPT before flipping the policy, and 51820/udp
+    # stays world-open so WireGuard clients can still connect.
+    - name: Deploy gateway INPUT firewall script
+      ansible.builtin.template:
+        src: ../templates/wireguard/zeroth-gateway-input.sh.j2
+        dest: /usr/local/sbin/zeroth-gateway-input.sh
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Apply gateway INPUT firewall
+
+    - name: Deploy gateway INPUT firewall unit
+      ansible.builtin.copy:
+        src: ../files/firewall/zeroth-gateway-input.service
+        dest: /etc/systemd/system/zeroth-gateway-input.service
+        mode: "0644"
+      notify: Apply gateway INPUT firewall
+
+    - name: Enable gateway INPUT firewall at boot
+      ansible.builtin.systemd:
+        name: zeroth-gateway-input
+        enabled: true
+        daemon_reload: true
+
+    - name: Persist iptables rules (netfilter-persistent)
+      ansible.builtin.shell: iptables-save > /etc/iptables/rules.v4
+      changed_when: false
+
+    # --- security-assessor #16/#10: scope monitoring ports off the /8 overlay ---
+    - name: Restrict node_exporter (9100) to the monitoring host only
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_12>/32"
+        port: "9100"
+        proto: tcp
+        comment: "node_exporter — monitoring-01 scrape only"
+
+    - name: Restrict Prometheus/Alertmanager (9090/9093) to admin subnet + jumpserver
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item.0 }}"
+        port: "{{ item.1 }}"
+        proto: tcp
+        comment: "monitoring UI — {{ item.0 }}"
+      loop: "{{ [wg_admin_subnet, '<REDACTED_IP_14>/32'] | product(['9090','9093']) | list }}"
+
+    - name: Remove stale /8 grants for monitoring ports — tcp form (#16/#10)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ item }}"
+        proto: tcp
+        delete: true
+      loop: ["9100", "9090", "9093"]
+      failed_when: false
+
+    - name: Remove stale /8 grants for monitoring ports — bare form (#16/#10)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ item }}"
+        delete: true
+      loop: ["9100", "9090", "9093"]
+      failed_when: false
+
+    - name: Restrict Llama inference (8000) to admin subnet + analytics (security-assessor #14)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item }}"
+        port: "8000"
+        proto: tcp
+        comment: "Llama inference — scoped"
+      loop:
+        - "{{ wg_admin_subnet }}"
+        - "<REDACTED_IP_10>/32"
+
+    - name: Remove stale /8 grant for Llama 8000 — tcp form (#14)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "8000"
+        proto: tcp
+        delete: true
+      failed_when: false
+
+    - name: Remove stale /8 grant for Llama 8000 — bare form (#14)
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "8000"
+        delete: true
+      failed_when: false
+
+  handlers:
+    - name: Restart WireGuard client
+      ansible.builtin.systemd:
+        name: wg-quick@wg0
+        state: restarted
+
+# ── Admin Client Routing ──────────────────────────────────────────────────────
+# Allows admin WireGuard clients (<REDACTED_IP_4>/24) to reach all overlay servers.
+# Persists across reboots and WireGuard restarts via systemd.
+
+- name: Deploy admin client routing on gateways
+  hosts: wireguard_gateways
+  become: true
+
+  tasks:
+
+    - name: Deploy zeroth-admin-routing systemd service
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Zeroth Cloud admin client routing rules
+          After=network.target wg-quick@wg0.service
+          Wants=wg-quick@wg0.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c '\
+            iptables -C FORWARD -s <REDACTED_IP_4>/24 -d <REDACTED_IP_2>/8 -j ACCEPT 2>/dev/null || \
+              iptables -I FORWARD 1 -s <REDACTED_IP_4>/24 -d <REDACTED_IP_2>/8 -j ACCEPT; \
+            iptables -C FORWARD -s <REDACTED_IP_2>/8 -d <REDACTED_IP_4>/24 -j ACCEPT 2>/dev/null || \
+              iptables -I FORWARD 1 -s <REDACTED_IP_2>/8 -d <REDACTED_IP_4>/24 -j ACCEPT; \
+            iptables -t nat -C POSTROUTING -s <REDACTED_IP_4>/24 -d <REDACTED_IP_2>/8 -j SNAT --to-source <REDACTED_IP_42> 2>/dev/null || \
+              iptables -t nat -A POSTROUTING -s <REDACTED_IP_4>/24 -d <REDACTED_IP_2>/8 -j SNAT --to-source <REDACTED_IP_42>'
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/zeroth-admin-routing.service
+        mode: "0644"
+      notify: Enable admin routing
+
+  handlers:
+
+    - name: Enable admin routing
+      ansible.builtin.systemd:
+        name: zeroth-admin-routing
+        enabled: true
+        state: started
+        daemon_reload: true
+
+# ── Overlay SSH Access ────────────────────────────────────────────────────────
+# Allows SSH from infrastructure and admin subnets over the WireGuard overlay.
+# Gateways are excluded (they don't use UFW).
+
+- name: Allow overlay SSH on all servers
+  hosts: all:!wireguard_gateways
+  become: true
+
+  tasks:
+
+    - name: Allow SSH from infrastructure overlay
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_2>/24"
+        to_port: "22"
+        proto: tcp
+        comment: "SSH from infrastructure overlay"
+
+    - name: Allow SSH from admin clients
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_4>/24"
+        to_port: "22"
+        proto: tcp
+        comment: "SSH from admin clients"

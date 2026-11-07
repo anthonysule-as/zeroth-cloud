@@ -1,0 +1,24 @@
+# Zeroth Cloud v3 — TheHive 5 Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+play.http.secret.key = "{{ vault_thehive_secret_key }}"
+
+storage {
+  provider = localfs
+  localfs.location = /opt/thehive/data
+}
+
+auth {
+  providers = [
+    {name: session}
+    {name: local}
+    {name: key}
+    {name: basic, realm: thehive}
+  ]
+}
+
+organisation.defaults.user-defined-templates = true
+
+https.port = 9443
+play.server.https.keyStore.path = /opt/thehive/certs/thehive.p12
+play.server.https.keyStore.type = PKCS12
+play.server.https.keyStore.password = REDACTED

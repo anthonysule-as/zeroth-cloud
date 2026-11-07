@@ -1,0 +1,194 @@
+# ansible/inventory/hosts.yml.example
+# Copy to hosts.yml and fill in real IPs before running any playbook.
+# All IPs should be on your colo management VLAN (e.g. <REDACTED_IP_93>/24).
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/zeroth_deploy
+    ansible_python_interpreter: /usr/bin/python3
+
+  children:
+
+    # ─────────────────────────────────────────────
+    # IAM — Deploy this FIRST before anything else
+    # ─────────────────────────────────────────────
+    jumpserver:
+      hosts:
+        jumpserver-01:
+          ansible_host: <REDACTED_IP_94>
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # Load Balancers (HAProxy + Keepalived)
+    # ─────────────────────────────────────────────
+    haproxy:
+      hosts:
+        haproxy-01:
+          ansible_host: <REDACTED_IP_95>
+          site: site_a
+          keepalived_state: MASTER
+          keepalived_priority: 150
+        haproxy-02:
+          ansible_host: <REDACTED_IP_96>
+          site: site_b
+          keepalived_state: BACKUP
+          keepalived_priority: 100
+      vars:
+        keepalived_vip: <REDACTED_IP_97>   # Floating VIP — update to your public IP
+
+    # ─────────────────────────────────────────────
+    # WireGuard Gateways (both always active)
+    # ─────────────────────────────────────────────
+    wireguard_gateways:
+      hosts:
+        wg-primary:
+          ansible_host: <REDACTED_IP_98>
+          site: site_a
+          wg_role: primary
+          public_ip: <SITE_A_PUBLIC_IP>   # Replace with colo-assigned public IP
+        wg-secondary:
+          ansible_host: <REDACTED_IP_99>
+          site: site_b
+          wg_role: secondary
+          public_ip: <SITE_B_PUBLIC_IP>   # Replace with colo-assigned public IP
+      vars:
+        wg_listen_port: 51820
+        wg_internal_network: "<REDACTED_IP_2>/8"
+
+    # ─────────────────────────────────────────────
+    # Wazuh Managers — Tier 1 (Dedicated per high-risk org)
+    # ─────────────────────────────────────────────
+    wazuh_dedicated:
+      hosts:
+        wazuh-mgr-01:
+          ansible_host: <REDACTED_IP_100>
+          org_id: 1
+          site: site_a
+        wazuh-mgr-02:
+          ansible_host: <REDACTED_IP_101>
+          org_id: 2
+          site: site_a
+        wazuh-mgr-03:
+          ansible_host: <REDACTED_IP_102>
+          org_id: 3
+          site: site_a
+        wazuh-mgr-04:
+          ansible_host: <REDACTED_IP_103>
+          org_id: 4
+          site: site_a
+        wazuh-mgr-05:
+          ansible_host: <REDACTED_IP_104>
+          org_id: 5
+          site: site_a
+        wazuh-mgr-06:
+          ansible_host: <REDACTED_IP_105>
+          org_id: 6
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # Wazuh Managers — Tier 2 (Shared, 6 orgs each)
+    # ─────────────────────────────────────────────
+    wazuh_shared:
+      hosts:
+        wazuh-shared-01:
+          ansible_host: <REDACTED_IP_106>
+          site: site_a
+          orgs_assigned: [7, 8, 9, 10, 11, 12]
+        wazuh-shared-02:
+          ansible_host: <REDACTED_IP_107>
+          site: site_a
+          orgs_assigned: [13, 14, 15, 16, 17, 18]
+        wazuh-shared-03:
+          ansible_host: <REDACTED_IP_108>
+          site: site_a
+          orgs_assigned: [19, 20, 21, 22, 23, 24]
+        wazuh-shared-04:
+          ansible_host: <REDACTED_IP_109>
+          site: site_a
+          orgs_assigned: [25, 26, 27, 28, 29, 30]
+
+    # ─────────────────────────────────────────────
+    # OpenSearch — 3-Node HA Cluster
+    # ─────────────────────────────────────────────
+    opensearch:
+      hosts:
+        opensearch-01:
+          ansible_host: <REDACTED_IP_110>
+          site: site_a
+          os_node_role: cluster_manager,data
+        opensearch-02:
+          ansible_host: <REDACTED_IP_111>
+          site: site_a
+          os_node_role: data
+        opensearch-03:
+          ansible_host: <REDACTED_IP_112>
+          site: site_a
+          os_node_role: data
+      vars:
+        os_cluster_name: zeroth-cloud
+        os_initial_manager_nodes:
+          - opensearch-01
+          - opensearch-02
+          - opensearch-03
+
+    # ─────────────────────────────────────────────
+    # Analytics Stack (single host — Docker Compose)
+    # ─────────────────────────────────────────────
+    analytics:
+      hosts:
+        analytics-01:
+          ansible_host: <REDACTED_IP_113>
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # Llama 3.1 8B — Dedicated compute node
+    # ─────────────────────────────────────────────
+    llama:
+      hosts:
+        llama-01:
+          ansible_host: <REDACTED_IP_114>
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # Monitoring Stack
+    # ─────────────────────────────────────────────
+    monitoring:
+      hosts:
+        monitoring-01:
+          ansible_host: <REDACTED_IP_115>
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # PostgreSQL + pgvector
+    # ─────────────────────────────────────────────
+    postgresql:
+      hosts:
+        postgresql-01:
+          ansible_host: <REDACTED_IP_116>
+          site: site_a
+
+    # ─────────────────────────────────────────────
+    # Site B — Warm Standby / DR
+    # ─────────────────────────────────────────────
+    helsinki_standby:
+      hosts:
+        hel-rebuild-01:
+          ansible_host: <REDACTED_IP_117>   # Site B management VLAN
+          site: site_b
+
+    # ─────────────────────────────────────────────
+    # Pre-staged spares (bootstrapped but idle)
+    # Assign a role and run the appropriate playbook when a new org enrolls
+    # ─────────────────────────────────────────────
+    spares:
+      hosts:
+        spare-01:
+          ansible_host: <REDACTED_IP_118>
+          site: site_a
+        spare-02:
+          ansible_host: <REDACTED_IP_119>
+          site: site_a
+        spare-03:
+          ansible_host: <REDACTED_IP_120>
+          site: site_a

@@ -1,0 +1,37 @@
+# Zeroth Cloud v3 — PostgreSQL Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# PUBLIC IP TOPOLOGY: listens on WireGuard overlay IP only.
+
+# Bind to WireGuard overlay IP — not 0.0.0.0, not the public IP
+listen_addresses = '{{ wg_overlay_ip }},127.0.0.1'
+port = {{ postgresql_port }}
+max_connections = 200
+
+shared_buffers            = {{ [((ansible_memtotal_mb * 0.25) | int), 512] | max }}MB
+effective_cache_size      = {{ [((ansible_memtotal_mb * 0.5) | int), 1024] | max }}MB
+maintenance_work_mem      = 64MB
+work_mem                  = 8MB
+
+wal_level                 = replica
+max_wal_size              = 4GB
+min_wal_size              = 1GB
+checkpoint_completion_target = 0.9
+
+random_page_cost          = 1.1
+effective_io_concurrency  = 200
+default_statistics_target = 100
+
+log_destination           = 'stderr'
+logging_collector         = on
+log_directory             = '{{ luks_mount_point }}/postgresql/logs'
+log_filename              = 'postgresql-%Y-%m-%d.log'
+log_rotation_age          = 1d
+log_min_duration_statement = 1000
+log_connections           = on
+log_disconnections        = on
+log_line_prefix           = '%m [%p] %q%u@%d '
+
+# TLS handled at WireGuard layer — no need for SSL at PostgreSQL level
+ssl = off
+password_encryption = scram-sha-256
+data_directory = '{{ postgresql_data_dir }}'

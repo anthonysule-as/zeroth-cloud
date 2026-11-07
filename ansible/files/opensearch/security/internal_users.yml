@@ -1,0 +1,25 @@
+---
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "REDACTED_HASH"
+  reserved: true
+  backend_roles:
+  - "admin"
+  description: "Zeroth Cloud OpenSearch administrator"
+
+grafana_ro:
+  hash: "REDACTED_HASH"
+  reserved: false
+  backend_roles:
+  - "zeroth_reader"
+  description: "Grafana per-org datasources - read only on wazuh-alerts-*"
+
+wazuh_writer:
+  hash: "REDACTED_HASH"
+  reserved: false
+  backend_roles:
+  - "zeroth_writer"
+  description: "wazuh-forward.py alert ingestion - write only"

@@ -1,0 +1,162 @@
+---
+# ─── OpenSearch internal PKI (security-assessor #6) ─────────────────────────────────────
+# Rebuilds the node certificates from the CA held in the vault, so a DR restore
+# produces the SAME PKI. A fresh CA would simultaneously invalidate Grafana's 30
+# datasources and wazuh-forward on every manager.
+#
+# Certificate generation runs on the CONTROLLER (delegate_to: localhost) so the
+# CA private key is never written to a node. Only per-node cert+key, the CA
+# cert, and the admin cert are distributed.
+#
+# Internal users/roles are NOT created here. After this playbook, seed them ON A
+# CLUSTER NODE (not the controller — the tools only exist where OpenSearch is
+# installed):
+#
+#   ssh opensearch-01
+#   cd /usr/share/opensearch/plugins/opensearch-security/tools
+#   OPENSEARCH_JAVA_HOME=/usr/share/opensearch/jdk ./securityadmin.sh \
+#     -cd /etc/opensearch/opensearch-security/ -icl -nhnv \
+#     -cacert /etc/opensearch/certs/root-ca.pem \
+#     -cert /etc/opensearch/certs/admin.pem \
+#     -key /etc/opensearch/certs/admin-key.pem -h <REDACTED_IP_8>
+#
+# Re-running it overwrites anything changed through the Security API, so it is
+# deliberately not automated.
+
+- name: Generate OpenSearch node certificates from the vaulted CA
+  hosts: opensearch
+  become: false
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+  vars:
+    pki_dir: /root/os-pki
+
+  tasks:
+    - name: Ensure the controller PKI directory exists
+      ansible.builtin.file:
+        path: "{{ pki_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Restore the CA and admin material from the vault
+      ansible.builtin.copy:
+        content: "{{ item.b64 | b64decode }}"
+        dest: "{{ pki_dir }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: "root-ca.pem",    b64: "{{ vault_opensearch_ca_cert_b64 }}",    mode: "0644" }
+        - { name: "root-ca-key.pem", b64: "{{ vault_opensearch_ca_key_b64 }}",    mode: "0600" }
+        - { name: "admin.pem",      b64: "{{ vault_opensearch_admin_cert_b64 }}", mode: "0644" }
+        - { name: "admin-key.pem",  b64: "{{ vault_opensearch_admin_key_b64 }}",  mode: "0600" }
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: Generate this node's key (skipped once the PKCS#8 key exists)
+      ansible.builtin.command:
+        cmd: openssl genrsa -out {{ pki_dir }}/{{ inventory_hostname }}-key-raw.pem 4096
+        creates: "{{ pki_dir }}/{{ inventory_hostname }}-key.pem"
+      delegate_to: localhost
+
+    - name: Convert the key to PKCS#8 (the security plugin will not load PKCS#1)
+      ansible.builtin.command:
+        cmd: >-
+          openssl pkcs8 -inform PEM -outform PEM -topk8 -nocrypt
+          -in {{ pki_dir }}/{{ inventory_hostname }}-key-raw.pem
+          -out {{ pki_dir }}/{{ inventory_hostname }}-key.pem
+        creates: "{{ pki_dir }}/{{ inventory_hostname }}-key.pem"
+      delegate_to: localhost
+
+    - name: Remove the intermediate PKCS#1 key
+      ansible.builtin.file:
+        path: "{{ pki_dir }}/{{ inventory_hostname }}-key-raw.pem"
+        state: absent
+      delegate_to: localhost
+
+    - name: Sign this node's certificate with SANs (if absent)
+      ansible.builtin.shell: |
+        cd {{ pki_dir }}
+        printf 'subjectAltName=DNS:{{ inventory_hostname }},IP:{{ hostvars[inventory_hostname]["wg_overlay_ip"] }},IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\nbasicConstraints=CA:FALSE\n' > {{ inventory_hostname }}.ext
+        openssl req -new -key {{ inventory_hostname }}-key.pem -out {{ inventory_hostname }}.csr \
+          -subj "/C=NG/O=Resilience Technologies/OU=Zeroth Cloud/CN={{ inventory_hostname }}"
+        openssl x509 -req -in {{ inventory_hostname }}.csr -CA root-ca.pem -CAkey root-ca-key.pem \
+          -CAcreateserial -sha256 -days 3650 -extfile {{ inventory_hostname }}.ext \
+          -out {{ inventory_hostname }}.pem
+        rm -f {{ inventory_hostname }}.csr {{ inventory_hostname }}.ext
+      args:
+        creates: "{{ pki_dir }}/{{ inventory_hostname }}.pem"
+      delegate_to: localhost
+
+- name: Distribute certificates to the OpenSearch nodes
+  hosts: opensearch
+  become: true
+  gather_facts: false
+  vars:
+    pki_dir: /root/os-pki
+
+  tasks:
+    - name: Create the certs directory
+      ansible.builtin.file:
+        path: /etc/opensearch/certs
+        state: directory
+        owner: opensearch
+        group: opensearch
+        mode: "0700"
+
+    - name: Copy certificates into place
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "/etc/opensearch/certs/{{ item.dest }}"
+        owner: opensearch
+        group: opensearch
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "{{ pki_dir }}/root-ca.pem",                        dest: "root-ca.pem",   mode: "0644" }
+        - { src: "{{ pki_dir }}/{{ inventory_hostname }}.pem",       dest: "node.pem",      mode: "0644" }
+        - { src: "{{ pki_dir }}/{{ inventory_hostname }}-key.pem",   dest: "node-key.pem",  mode: "0600" }
+        - { src: "{{ pki_dir }}/admin.pem",                          dest: "admin.pem",     mode: "0644" }
+        - { src: "{{ pki_dir }}/admin-key.pem",                      dest: "admin-key.pem", mode: "0600" }
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: Stage the security configuration (users, roles, mappings)
+      ansible.builtin.copy:
+        src: "../files/opensearch/security/{{ item }}"
+        dest: "/etc/opensearch/opensearch-security/{{ item }}"
+        owner: opensearch
+        group: opensearch
+        mode: "0600"
+      loop:
+        - internal_users.yml
+        - roles.yml
+        - roles_mapping.yml
+      # Staged only — securityadmin.sh must be run manually to load them into
+      # the cluster (see the header of this file).
+
+    - name: Verify each node has its OWN certificate
+      ansible.builtin.shell: |
+        openssl x509 -in /etc/opensearch/certs/node.pem -noout -subject | grep -q "CN={{ inventory_hostname }}"
+      changed_when: false
+
+- name: Distribute the CA to OpenSearch consumers
+  hosts: monitoring:wazuh_managers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ensure /etc/zeroth exists
+      ansible.builtin.file:
+        path: /etc/zeroth
+        state: directory
+        mode: "0755"
+
+    - name: Deploy the OpenSearch CA
+      ansible.builtin.copy:
+        src: /root/os-pki/root-ca.pem
+        dest: /etc/zeroth/opensearch-ca.pem
+        mode: "0644"

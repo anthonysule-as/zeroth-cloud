@@ -1,0 +1,3 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+ansible/group_vars/all/sec.yml diff=ansible-vault merge=binary

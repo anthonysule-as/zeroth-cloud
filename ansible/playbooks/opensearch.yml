@@ -1,0 +1,179 @@
+---
+# Zeroth Cloud v3 — OpenSearch 3-Node HA Cluster Playbook
+# Per-org index isolation: wazuh-alerts-<org>-YYYY.MM.DD
+# ILM: 30-day hot → 90-day warm → delete
+# All data on LUKS-encrypted /data volume (luks.yml must run first)
+
+- name: Deploy OpenSearch 3-Node HA Cluster
+  hosts: opensearch
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install Java (OpenJDK 17)
+      ansible.builtin.apt:
+        name: openjdk-17-jdk-headless
+        state: present
+        update_cache: true
+
+    - name: Import OpenSearch GPG key
+      ansible.builtin.get_url:
+        url: https://artifacts.opensearch.org/publickeys/opensearch.pgp
+        dest: /usr/share/keyrings/opensearch.pgp
+        mode: '0644'
+
+    - name: Add OpenSearch apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/opensearch.pgp] https://artifacts.opensearch.org/releases/bundle/opensearch/2.x/apt stable main"
+        state: present
+        filename: opensearch
+
+    - name: Pin OpenSearch version to prevent uncontrolled upgrades
+      ansible.builtin.copy:
+        content: |
+          Package: opensearch
+          Pin: version {{ opensearch_version }}
+          Pin-Priority: 1001
+        dest: /etc/apt/preferences.d/opensearch
+        mode: '0644'
+
+    - name: Install OpenSearch (with demo config disabled)
+      ansible.builtin.apt:
+        name: "opensearch={{ opensearch_version }}"
+        state: present
+        update_cache: true
+      environment:
+        OPENSEARCH_INITIAL_ADMIN_PASSWORD: "{{ vault_opensearch_admin_password }}"
+        DISABLE_INSTALL_DEMO_CONFIG: "true"
+        DISABLE_SECURITY_PLUGIN: "false"
+
+    - name: Create OpenSearch directories on LUKS volume
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: opensearch
+        group: opensearch
+        mode: "0750"
+      loop:
+        - "{{ luks_mount_point }}/opensearch/data"
+        - "{{ luks_mount_point }}/opensearch/logs"
+        - "{{ luks_mount_point }}/opensearch/tmp"
+
+    - name: Deploy opensearch.yml
+      ansible.builtin.template:
+        src: ../templates/opensearch/opensearch.yml.j2
+        dest: /etc/opensearch/opensearch.yml
+        owner: root
+        group: opensearch
+        mode: "0640"
+      notify: Restart OpenSearch
+
+    - name: Deploy JVM options
+      ansible.builtin.template:
+        src: ../templates/opensearch/jvm.options.j2
+        dest: /etc/opensearch/jvm.options
+        owner: root
+        group: opensearch
+        mode: "0640"
+      notify: Restart OpenSearch
+
+    - name: Set kernel parameters for OpenSearch
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop:
+        - { name: vm.max_map_count, value: "262144" }
+        - { name: vm.swappiness,    value: "1" }
+
+    - name: Set memlock ulimits for OpenSearch
+      ansible.builtin.lineinfile:
+        path: /etc/security/limits.conf
+        line: "{{ item }}"
+      loop:
+        - "opensearch soft memlock unlimited"
+        - "opensearch hard memlock unlimited"
+        - "opensearch soft nofile 65536"
+        - "opensearch hard nofile 65536"
+
+    - name: Create systemd override for OpenSearch memlock
+      ansible.builtin.file:
+        path: /etc/systemd/system/opensearch.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Deploy systemd override (LimitMEMLOCK=infinity)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/opensearch.service.d/override.conf
+        content: |
+          [Service]
+          LimitMEMLOCK=infinity
+          LimitNOFILE=65536
+        mode: "0644"
+      notify: Restart OpenSearch
+
+    - name: Enable and start OpenSearch
+      ansible.builtin.systemd:
+        name: opensearch
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for OpenSearch cluster to be healthy
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_cluster/health?wait_for_status=green&timeout=60s"
+        user: admin
+        password: "{{ vault_opensearch_admin_password }}"
+        validate_certs: false
+        status_code: 200
+      register: cluster_health
+      retries: 20
+      delay: 15
+      until: cluster_health.status == 200
+      run_once: true
+
+    - name: Apply ILM policy for per-org index lifecycle
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_plugins/_ism/policies/zeroth-org-policy"
+        method: PUT
+        user: admin
+        password: "{{ vault_opensearch_admin_password }}"
+        validate_certs: false
+        body_format: json
+        body: "{{ lookup('template', '../templates/opensearch/ilm-policy.json.j2') }}"
+        status_code: [200, 201, 409]
+      run_once: true
+
+    - name: Apply Wazuh alert index template (consistent field types)
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_index_template/wazuh-alerts"
+        method: PUT
+        user: admin
+        password: "{{ vault_opensearch_admin_password }}"
+        validate_certs: false
+        body_format: json
+        body: "{{ lookup('template', '../templates/opensearch/wazuh-index-template.json.j2') }}"
+        status_code: [200, 201]
+      run_once: true
+
+    - name: Allow OpenSearch ports from management VLAN
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ item }}"
+        proto: tcp
+        comment: "OpenSearch cluster"
+      loop:
+        - "{{ opensearch_http_port }}"
+        - "{{ opensearch_transport_port }}"
+
+  handlers:
+    - name: Restart OpenSearch
+      ansible.builtin.systemd:
+        name: opensearch
+        state: restarted

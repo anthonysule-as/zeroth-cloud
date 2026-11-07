@@ -1,0 +1,298 @@
+---
+# Zeroth Cloud v3 — Wazuh Managers Playbook
+# Deploys all 10 Wazuh managers (6 dedicated + 4 shared).
+# Ansible pushes rules centrally to all managers.
+
+- name: Deploy Wazuh Managers
+  hosts: wazuh_managers
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install Wazuh GPG key
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH |           gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+        chmod 644 /usr/share/keyrings/wazuh.gpg
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+        state: present
+        filename: wazuh
+
+    - name: Install Wazuh manager
+      ansible.builtin.apt:
+        name: "wazuh-manager={{ wazuh_version }}-*"
+        state: present
+        update_cache: true
+
+
+    # -- Wazuh PKI: agent enrollment is authenticated by client certificate --
+    # authd demands a cert signed by the Zeroth Wazuh CA (ssl_agent_ca).
+    - name: Deploy the Zeroth Wazuh CA (agent cert verification)
+      ansible.builtin.copy:
+        src: ../../files/wazuh/pki/zeroth-wazuh-ca.cert
+        dest: /var/ossec/etc/rootCA.pem
+        owner: root
+        group: wazuh
+        mode: "0640"
+      notify: Restart Wazuh manager
+
+    - name: Deploy the CA-signed manager certificate
+      ansible.builtin.copy:
+        src: ../../files/wazuh/pki/sslmanager.cert
+        dest: /var/ossec/etc/sslmanager.cert
+        owner: root
+        group: wazuh
+        mode: "0640"
+      notify: Restart Wazuh manager
+
+    - name: Deploy the manager private key (from vault)
+      ansible.builtin.copy:
+        content: "{{ vault_wazuh_manager_key_b64 | b64decode }}"
+        dest: /var/ossec/etc/sslmanager.key
+        owner: root
+        group: wazuh
+        mode: "0640"
+      no_log: true
+      notify: Restart Wazuh manager
+
+    - name: Deploy ossec.conf
+      ansible.builtin.template:
+        src: ../templates/wazuh/ossec.conf.j2
+        dest: /var/ossec/etc/ossec.conf
+        owner: root
+        group: wazuh
+        mode: "0640"
+      when: wazuh_deploy_ossec_conf | default(false) | bool
+      notify: Restart Wazuh manager
+      # DISABLED BY DEFAULT - this template overwrites the entire ossec.conf on
+      # every manager, and it has drifted from live before: it was missing
+      # <indexer> (which it would have deleted fleet-wide) and it still carried
+      # password-based enrollment after certificates were enforced.
+      # Diff against a live manager before enabling, then run deliberately:
+      #   -e wazuh_deploy_ossec_conf=true
+
+    - name: Deploy custom Zeroth Cloud detection rules
+      ansible.builtin.copy:
+        src: ../../rules/zeroth_custom.xml
+        dest: "{{ wazuh_rules_dir }}/zeroth_custom.xml"
+        owner: root
+        group: wazuh
+        mode: "0640"
+      notify: Restart Wazuh manager
+
+
+    - name: Set Wazuh registration password
+      ansible.builtin.copy:
+        content: "{{ vault_wazuh_registration_password }}"
+        dest: /var/ossec/etc/authd.pass
+        owner: root
+        group: wazuh
+        mode: "0640"
+      notify: Restart Wazuh manager
+
+    - name: Enable and start Wazuh manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        enabled: true
+        state: started
+
+    - name: Ensure Filebeat is stopped and disabled (replaced by wazuh-forward on Ubuntu 24.04)
+      ansible.builtin.systemd:
+        name: filebeat
+        enabled: false
+        state: stopped
+        masked: true
+      failed_when: false
+
+    - name: Remove stale over-broad /8 Wazuh grants (security-assessor finding #5 remediation)
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_2>/8"
+        port: "{{ item }}"
+        proto: tcp
+        delete: true
+      loop:
+        - "{{ wazuh_manager_port }}"
+        - "{{ wazuh_registration_port }}"
+        - "{{ wazuh_api_port }}"
+      failed_when: false
+
+    - name: Allow Wazuh agent/registration/API ports from infra + admin subnets ONLY
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item.0 }}"
+        port: "{{ item.1 }}"
+        proto: tcp
+        comment: "Wazuh {{ item.1 }} from {{ item.0 }}"
+      loop: "{{ [wg_infra_subnet, wg_admin_subnet] | product([wazuh_manager_port, wazuh_registration_port, wazuh_api_port]) | list }}"
+
+    - name: Allow Wazuh cluster sync (1516) between managers on the infra subnet ONLY
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wg_infra_subnet }}"
+        port: "{{ wazuh_cluster_port }}"
+        proto: tcp
+        comment: "Wazuh cluster mesh (managers only)"
+
+  handlers:
+    - name: Restart Wazuh manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+
+
+- name: Configure agent group isolation on shared managers
+  hosts: wazuh_shared
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Create agent group directories for each assigned org
+      ansible.builtin.file:
+        path: "{{ wazuh_shared_config_dir }}/org{{ item }}"
+        state: directory
+        owner: root
+        group: wazuh
+        mode: "0750"
+      loop: "{{ wazuh_org_ids }}"
+
+    - name: Deploy per-org agent group config
+      ansible.builtin.template:
+        src: ../templates/wazuh/agent-group.conf.j2
+        dest: "{{ wazuh_shared_config_dir }}/org{{ item }}/agent.conf"
+        owner: root
+        group: wazuh
+        mode: "0640"
+      vars:
+        org_id_var: "{{ item }}"
+      loop: "{{ wazuh_org_ids }}"
+      notify: Restart Wazuh manager
+
+    - name: Start Wazuh manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Verify Wazuh manager is running
+      ansible.builtin.command:
+        cmd: systemctl is-active wazuh-manager
+      changed_when: false
+      register: wazuh_status
+      failed_when: wazuh_status.rc != 0
+
+  handlers:
+    - name: Restart Wazuh manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+
+
+
+# ── Alert Forwarder to OpenSearch ────────────────────────────────────────────
+# Replaces Filebeat (broken on Ubuntu 24.04 kernel)
+# Forwards alerts.json to per-org OpenSearch indices
+
+- name: Deploy Wazuh alert forwarder
+  hosts: wazuh_managers
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Deploy hardened wazuh-forward.py
+      ansible.builtin.template:
+        src: ../templates/wazuh/wazuh-forward.py.j2
+        dest: /usr/local/bin/wazuh-forward.py
+        mode: "0755"
+      notify: Restart wazuh-forward
+
+    - name: Ensure forwarder state dir exists
+      ansible.builtin.file:
+        path: /var/lib/wazuh-forward
+        state: directory
+        mode: "0750"
+
+    - name: Remove orphaned legacy position file
+      ansible.builtin.file:
+        path: /var/lib/filebeat/wazuh-forward.pos
+        state: absent
+
+    - name: Set org-specific index prefix for dedicated managers
+      ansible.builtin.set_fact:
+        wazuh_index_prefix: "wazuh-alerts-{{ wazuh_org_name | default('shared') }}"
+
+    - name: Deploy wazuh-forward systemd service
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Wazuh Alert Forwarder to OpenSearch
+          After=wazuh-manager.service
+          [Service]
+          Type=simple
+          Environment=WAZUH_INDEX_PREFIX={{ wazuh_index_prefix }}
+          ExecStart=/usr/bin/python3 /usr/local/bin/wazuh-forward.py
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/wazuh-forward.service
+        mode: "0644"
+      notify: Restart wazuh-forward
+
+  handlers:
+
+    - name: Restart wazuh-forward
+      ansible.builtin.systemd:
+        name: wazuh-forward
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+# ── Wazuh API credential rotation (security-assessor finding #2) ───────────────────────
+# Rotates built-in wazuh (id 1) and wazuh-wui (id 2) off default passwords.
+# Idempotent: re-runs are no-ops once rotated. Secrets via env, never argv.
+- name: Rotate Wazuh API credentials off defaults
+  hosts: wazuh_managers
+  become: true
+  vars_files:
+    - ../group_vars/all/secrets.yml
+  tasks:
+    - name: Deploy API rotation helper
+      ansible.builtin.template:
+        src: ../templates/wazuh/rotate-api-user.sh.j2
+        dest: /usr/local/bin/rotate-api-user.sh
+        mode: "0700"
+
+    - name: Rotate 'wazuh' (id 1) API admin password
+      ansible.builtin.command: /usr/local/bin/rotate-api-user.sh 1 wazuh wazuh
+      environment:
+        WZ_NEW_PW: "{{ vault_wazuh_api_password }}"
+      register: rot_admin
+      changed_when: "'rotated:' in rot_admin.stdout"
+      failed_when: rot_admin.rc != 0
+
+    - name: Rotate 'wazuh-wui' (id 2) password
+      ansible.builtin.command: /usr/local/bin/rotate-api-user.sh 2 wazuh-wui wazuh-wui
+      environment:
+        WZ_NEW_PW: "{{ vault_wazuh_wui_password }}"
+      register: rot_wui
+      changed_when: "'rotated:' in rot_wui.stdout"
+      failed_when: rot_wui.rc != 0
+
+    - name: Show rotation results
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: admin={{ rot_admin.stdout }} | wui={{ rot_wui.stdout }}"

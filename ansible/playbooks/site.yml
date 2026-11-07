@@ -1,0 +1,59 @@
+---
+# =============================================================================
+# Zeroth Cloud v3 — Master Playbook
+# =============================================================================
+# Deploys the full stack in the correct dependency order.
+# JumpServer is always deployed first. All other hosts should be registered
+# in JumpServer before this playbook completes.
+#
+# Usage:
+#   ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/site.yml \
+#     --ask-vault-pass
+#
+# To deploy only a specific layer, use --tags:
+#   ansible-playbook site.yml --tags wireguard --ask-vault-pass
+# =============================================================================
+
+- name: "LAYER 0 — JumpServer IAM (must be first)"
+  import_playbook: jumpserver.yml
+  tags: [jumpserver, iam, always]
+
+- name: "LAYER 2a — WireGuard Dual Gateways"
+  import_playbook: wireguard.yml
+  tags: [wireguard, network, layer2]
+
+- name: "LAYER 2b — HAProxy + Keepalived"
+  import_playbook: haproxy.yml
+  tags: [haproxy, loadbalancer, layer2]
+
+- name: "LAYER 2c — LUKS + Tang (all data nodes)"
+  import_playbook: luks.yml
+  tags: [luks, encryption, layer2]
+
+- name: "LAYER 3a — OpenSearch 3-Node HA Cluster"
+  import_playbook: opensearch.yml
+  tags: [opensearch, storage, layer3]
+
+- name: "LAYER 3b — PostgreSQL + pgvector"
+  import_playbook: postgresql.yml
+  tags: [postgresql, pgvector, storage, layer3]
+
+- name: "LAYER 2d — Wazuh Managers (Dedicated + Shared)"
+  import_playbook: wazuh_managers.yml
+  tags: [wazuh, ingestion, layer2]
+
+- name: "LAYER 3c — Llama 3.1 8B Inference Engine"
+  import_playbook: llama.yml
+  tags: [llama, ai, layer3]
+
+- name: "LAYER 4 — Analytics Stack (TheHive + Shuffle + MISP + Cortex)"
+  import_playbook: analytics.yml
+  tags: [analytics, thehive, shuffle, misp, cortex, layer4]
+
+- name: "LAYER 5 — Monitoring (Prometheus + Alertmanager + Grafana)"
+  import_playbook: monitoring.yml
+  tags: [monitoring, prometheus, grafana, layer5]
+
+- name: "DR — Validate Helsinki Warm Standby"
+  import_playbook: dr_test.yml
+  tags: [dr, disaster_recovery, validate]

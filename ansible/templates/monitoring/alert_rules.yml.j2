@@ -1,0 +1,130 @@
+# Zeroth Cloud v3 — Prometheus Alert Rules
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Covers all components from the self-monitoring layer.
+
+groups:
+
+  - name: zeroth_wazuh
+    rules:
+
+      - alert: WazuhManagerSilent
+        expr: |
+          time() - wazuh_manager_last_keepalive > {{ prometheus_alert_wazuh_silence_minutes * 60 }}
+        for: 1m
+        labels:
+          severity: critical
+          component: wazuh
+        annotations:
+          summary: "Wazuh manager {{ '{{' }} $labels.instance {{ '}}' }} is not reporting"
+          description: "Manager has been silent for more than {{ prometheus_alert_wazuh_silence_minutes }} minutes. Agents may be disconnected."
+
+      - alert: WazuhAlertIngestionDrop
+        expr: |
+          rate(wazuh_alerts_total[5m]) < (
+            avg_over_time(rate(wazuh_alerts_total[5m])[1h:5m]) * {{ (100 - prometheus_alert_ingestion_drop_pct) / 100 }}
+          )
+        for: 10m
+        labels:
+          severity: warning
+          component: wazuh
+        annotations:
+          summary: "Alert ingestion rate dropped by >{{ prometheus_alert_ingestion_drop_pct }}%"
+          description: "Possible agent connectivity issue or Wazuh manager problem."
+
+  - name: zeroth_opensearch
+    rules:
+
+      - alert: OpenSearchNodeDown
+        expr: opensearch_cluster_nodes_number < 3
+        for: 2m
+        labels:
+          severity: critical
+          component: opensearch
+        annotations:
+          summary: "OpenSearch cluster has fewer than 3 nodes"
+          description: "A node has dropped from the cluster. Current nodes: {{ '{{' }} $value {{ '}}' }}"
+
+      - alert: OpenSearchDiskHigh
+        expr: |
+          (node_filesystem_size_bytes{mountpoint="/data"} - node_filesystem_free_bytes{mountpoint="/data"})
+          / node_filesystem_size_bytes{mountpoint="/data"} * 100 > {{ prometheus_alert_disk_usage_pct }}
+        for: 5m
+        labels:
+          severity: warning
+          component: opensearch
+        annotations:
+          summary: "Disk usage on {{ '{{' }} $labels.instance {{ '}}' }} exceeds {{ prometheus_alert_disk_usage_pct }}%"
+          description: "Current usage: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%"
+
+  - name: zeroth_wireguard
+    rules:
+
+      - alert: WireGuardTunnelDown
+        expr: |
+          wireguard_peer_last_handshake_seconds > {{ prometheus_alert_wireguard_down_minutes * 60 }}
+        for: 2m
+        labels:
+          severity: critical
+          component: wireguard
+        annotations:
+          summary: "WireGuard peer {{ '{{' }} $labels.public_key {{ '}}' }} tunnel is down"
+          description: "No handshake in {{ prometheus_alert_wireguard_down_minutes }} minutes. Org may be disconnected."
+
+  - name: zeroth_llama
+    rules:
+
+      - alert: LlamaInferenceLatencyHigh
+        expr: |
+          vllm_request_latency_seconds{quantile="0.95"} > {{ prometheus_alert_llama_latency_seconds }}
+        for: 5m
+        labels:
+          severity: warning
+          component: llama
+        annotations:
+          summary: "Llama inference p95 latency exceeds {{ prometheus_alert_llama_latency_seconds }}s"
+          description: "Current p95: {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}s. Alert enrichment may be delayed."
+
+  - name: zeroth_infrastructure
+    rules:
+
+      - alert: NodeDiskCritical
+        expr: |
+          (node_filesystem_size_bytes - node_filesystem_free_bytes)
+          / node_filesystem_size_bytes * 100 > 90
+        for: 2m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Disk critically full on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Usage at {{ '{{' }} $value | printf \"%.1f\" {{ '}}' }}%. Immediate action required."
+
+      - alert: NodeDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Node {{ '{{' }} $labels.instance {{ '}}' }} is unreachable"
+          description: "Prometheus cannot scrape this target. Server may be down."
+
+      - alert: HAProxyBackendDown
+        expr: haproxy_backend_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: haproxy
+        annotations:
+          summary: "HAProxy backend {{ '{{' }} $labels.proxy {{ '}}' }} is down"
+          description: "All servers in this backend have failed health checks."
+
+      - alert: LUKSDeviceNotMounted
+        expr: node_filesystem_size_bytes{mountpoint="/data"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "LUKS /data volume not mounted on {{ '{{' }} $labels.instance {{ '}}' }}"
+          description: "Server may have rebooted without Tang unlock. KVM console access required."

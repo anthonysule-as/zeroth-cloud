@@ -1,0 +1,12 @@
+[Unit]
+Description=Zeroth Cloud JumpServer web port lockdown
+After=network-online.target ufw.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zeroth-jumpserver-lockdown.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,94 @@
+---
+- name: Deploy Llama 3.1 8B Inference Engine (llama.cpp CPU)
+  hosts: llama
+  become: true
+
+  tasks:
+    - name: Install build dependencies
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - git
+          - curl
+          - build-essential
+          - cmake
+        state: present
+        update_cache: true
+
+    - name: Create llama.cpp directory
+      ansible.builtin.file:
+        path: /opt/llama
+        state: directory
+        mode: "0755"
+
+    - name: Clone llama.cpp
+      ansible.builtin.git:
+        repo: https://github.com/ggerganov/llama.cpp.git
+        dest: /opt/llama/llama.cpp
+        version: master
+        depth: 1
+        force: true
+
+    - name: Build llama.cpp (CPU only)
+      ansible.builtin.shell:
+        cmd: cmake -B build -DLLAMA_CURL=ON && cmake --build build --config Release -j $(nproc)
+        chdir: /opt/llama/llama.cpp
+        creates: /opt/llama/llama.cpp/build/bin/llama-server
+
+    - name: Create models directory
+      ansible.builtin.file:
+        path: /opt/llama/models
+        state: directory
+        mode: "0755"
+
+    - name: Create Python venv for API wrapper
+      ansible.builtin.command:
+        cmd: python3 -m venv /opt/llama/venv
+        creates: /opt/llama/venv/bin/activate
+
+    - name: Install Python API dependencies
+      ansible.builtin.pip:
+        name:
+          - huggingface_hub[cli]
+          - requests
+        virtualenv: /opt/llama/venv
+        state: present
+
+    - name: Deploy llama-server systemd service
+      ansible.builtin.template:
+        src: ../templates/llama/llama-server.service.j2
+        dest: /etc/systemd/system/llama-server.service
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Deploy model download script
+      ansible.builtin.template:
+        src: ../templates/llama/download-model.sh.j2
+        dest: /opt/llama/download-model.sh
+        mode: "0755"
+
+    - name: Allow llama port from WireGuard overlay
+      community.general.ufw:
+        rule: allow
+        src: "<REDACTED_IP_2>/8"
+        port: "{{ llama_port }}"
+        proto: tcp
+
+    - name: Check if model exists
+      ansible.builtin.stat:
+        path: /opt/llama/models/llama-3.1-8b-instruct-q4_k_m.gguf
+      register: model_file
+
+    - name: Download Llama 3.1 8B Q4_K_M model
+      ansible.builtin.command:
+        cmd: /opt/llama/download-model.sh
+      when: not model_file.stat.exists
+      async: 3600
+      poll: 30
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

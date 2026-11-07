@@ -1,0 +1,9 @@
+org_name: org01
+org_id: 1
+next_ip: 16
+devices:
+- name: pentester02
+  ip: 15
+  overlay_ip: <REDACTED_IP_121>
+  public_key: REDACTED_WG_KEY
+  added_at: '2026-08-27T23:22:00Z'

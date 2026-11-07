@@ -1,0 +1,41 @@
+#!/bin/bash
+# Zeroth Cloud v3 — WireGuard Per-Org Network Isolation Rules
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Confines each org to HAProxy + its assigned Wazuh manager ONLY.
+# PRESERVES internet forwarding + NAT (orgs reach internet via this gateway).
+set -euo pipefail
+echo "[*] Applying WireGuard isolation rules..."
+
+# ═══ FLUSH FORWARD ONLY — never touch nat (preserves MASQUERADE + admin SNAT) ═══
+iptables -F FORWARD
+
+# ═══ DEFAULT POLICY: DROP ═══
+iptables -P FORWARD DROP
+
+# ═══ STATEFUL RETURN TRAFFIC ═══
+iptables -A FORWARD -i wg0 -o wg0 -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# ═══ INFRASTRUCTURE ↔ INFRASTRUCTURE ═══
+iptables -A FORWARD -i wg0 -o wg0 -s <REDACTED_IP_2>/24 -d <REDACTED_IP_2>/24 -j ACCEPT
+
+# ═══ ADMIN ↔ INFRASTRUCTURE (bidirectional) ═══
+iptables -A FORWARD -i wg0 -o wg0 -s {{ wg_admin_subnet | default('<REDACTED_IP_4>/24') }} -d <REDACTED_IP_2>/24 -j ACCEPT
+iptables -A FORWARD -i wg0 -o wg0 -s <REDACTED_IP_2>/24 -d {{ wg_admin_subnet | default('<REDACTED_IP_4>/24') }} -j ACCEPT
+
+# ═══ PER-ORG RULES — each org → HAProxy VIPs + assigned manager ONLY ═══
+{% for org in zeroth_orgs %}
+# --- {{ org.id }} ({{ org.subnet }}) → {{ org.wazuh_manager_name }} ({{ org.wazuh_manager_ip }}) [{{ org.tier }}] ---
+iptables -A FORWARD -i wg0 -o wg0 -s {{ org.subnet }} -d {{ wg_overlay_haproxy_a | default('<REDACTED_IP_5>') }} -j ACCEPT
+iptables -A FORWARD -i wg0 -o wg0 -s {{ org.subnet }} -d {{ wg_overlay_haproxy_b | default('<REDACTED_IP_15>') }} -j ACCEPT
+iptables -A FORWARD -i wg0 -o wg0 -s {{ org.subnet }} -d {{ org.wazuh_manager_ip }} -j ACCEPT
+{% endfor %}
+
+# ═══ INTERNET FORWARDING — orgs route out via eth0 (NAT handled in POSTROUTING) ═══
+iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
+iptables -A FORWARD -i eth0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# nat POSTROUTING (MASQUERADE + admin SNAT) intentionally NOT managed here — left intact.
+
+# ═══ PERSIST (FORWARD only; nat untouched) ═══
+netfilter-persistent save
+echo "[✓] Isolation rules applied — $(iptables -L FORWARD -n | grep -c ACCEPT) ACCEPT, policy DROP"

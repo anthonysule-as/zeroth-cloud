@@ -1,0 +1,72 @@
+---
+# Zeroth Cloud v3 — Tang LUKS Key Server Playbook
+# Tang provides network-bound disk encryption (NBDE).
+# Data nodes unlock LUKS automatically at boot ONLY if Tang is reachable.
+# MUST be deployed before the luks.yml playbook.
+
+- name: Deploy Tang LUKS Key Server
+  hosts: tang
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+
+  tasks:
+
+    - name: Install Tang
+      ansible.builtin.apt:
+        name:
+          - tang
+          - jose
+        state: present
+        update_cache: true
+
+    - name: Create Tang key directory
+      ansible.builtin.file:
+        path: /var/db/tang
+        state: directory
+        owner: _tang
+        group: _tang
+        mode: "0700"
+
+    - name: Generate Tang signing and exchange keys
+      ansible.builtin.command: >
+        jose jwk gen -i '{"alg":"ES512"}' -o /var/db/tang/sig.jwk
+      args:
+        creates: /var/db/tang/sig.jwk
+      become_user: _tang
+
+    - name: Generate Tang exchange key
+      ansible.builtin.command: >
+        jose jwk gen -i '{"alg":"ECMR"}' -o /var/db/tang/exc.jwk
+      args:
+        creates: /var/db/tang/exc.jwk
+      become_user: _tang
+
+    - name: Enable and start Tang socket
+      ansible.builtin.systemd:
+        name: tangd.socket
+        enabled: true
+        state: started
+
+    - name: Restrict Tang to management VLAN only
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "80"
+        proto: tcp
+        comment: "Tang NBDE key server — management VLAN only"
+
+    - name: Print Tang thumbprint for verification
+      ansible.builtin.command: >
+        jose jwk thp -i /var/db/tang/*.jwk 2>/dev/null || ls /var/db/tang/
+      register: tang_thumbprint
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display Tang server thumbprint
+      ansible.builtin.debug:
+        msg: |
+          Tang server deployed.
+          Thumbprint: {{ tang_thumbprint.stdout }}
+          Store this thumbprint — it is required when binding LUKS devices.
+          URL: http://{{ ansible_host }}

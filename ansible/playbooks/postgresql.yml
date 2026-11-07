@@ -1,0 +1,137 @@
+---
+# Zeroth Cloud v3 — PostgreSQL + pgvector Playbook
+# Single disk topology — data stays at /var/lib/postgresql but configs point to /data
+
+- name: Deploy PostgreSQL + pgvector
+  hosts: postgresql
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install PostgreSQL and pgvector
+      ansible.builtin.apt:
+        name:
+          - "postgresql-{{ postgresql_version }}"
+          - "postgresql-{{ postgresql_version }}-pgvector"
+          - postgresql-client
+          - python3-psycopg2
+        state: present
+        update_cache: true
+
+    - name: Create /data/postgresql directory
+      ansible.builtin.file:
+        path: /data/postgresql
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0700"
+
+    - name: Create log directory
+      ansible.builtin.file:
+        path: /data/postgresql/logs
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0700"
+
+    - name: Deploy postgresql.conf
+      ansible.builtin.template:
+        src: ../templates/postgresql/postgresql.conf.j2
+        dest: "/etc/postgresql/{{ postgresql_version }}/main/postgresql.conf"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+      notify: Restart PostgreSQL
+
+    - name: Deploy pg_hba.conf
+      ansible.builtin.template:
+        src: ../templates/postgresql/pg_hba.conf.j2
+        dest: "/etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+      notify: Restart PostgreSQL
+
+    - name: Ensure PostgreSQL cluster is running
+      ansible.builtin.command:
+        cmd: pg_ctlcluster {{ postgresql_version }} main start
+      register: pg_start
+      failed_when:
+        - pg_start.rc != 0
+        - "'already running' not in pg_start.stderr"
+      changed_when: pg_start.rc == 0
+
+    - name: Enable PostgreSQL service
+      ansible.builtin.systemd:
+        name: postgresql
+        enabled: true
+
+    - name: Enable pgvector extension
+      community.postgresql.postgresql_ext:
+        name: vector
+        db: postgres
+        login_user: postgres
+        state: present
+      become_user: postgres
+
+    - name: Create databases
+      community.postgresql.postgresql_db:
+        name: "{{ item }}"
+        login_user: postgres
+        state: present
+      become_user: postgres
+      loop:
+        - thehive
+        - misp
+        - zeroth_rag
+
+    - name: Create database users
+      community.postgresql.postgresql_user:
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        login_user: postgres
+        state: present
+      become_user: postgres
+      no_log: true
+      loop:
+        - { name: thehive,   password: "{{ vault_postgresql_thehive_password }}" }
+        - { name: misp,      password: "{{ vault_postgresql_misp_password }}" }
+        - { name: llama_rag, password: "{{ vault_postgresql_llama_rag_password }}" }
+
+    - name: Grant database privileges
+      community.postgresql.postgresql_privs:
+        db: "{{ item.db }}"
+        privs: ALL
+        type: database
+        role: "{{ item.role }}"
+        login_user: postgres
+      become_user: postgres
+      loop:
+        - { db: thehive,    role: thehive }
+        - { db: misp,       role: misp }
+        - { db: zeroth_rag, role: llama_rag }
+
+    - name: Enable pgvector in zeroth_rag database
+      community.postgresql.postgresql_ext:
+        name: vector
+        db: zeroth_rag
+        login_user: postgres
+        state: present
+      become_user: postgres
+
+    - name: Allow PostgreSQL from WireGuard overlay
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ postgresql_port }}"
+        proto: tcp
+        comment: "PostgreSQL — overlay only"
+
+  handlers:
+    - name: Restart PostgreSQL
+      ansible.builtin.command:
+        cmd: pg_ctlcluster {{ postgresql_version }} main restart
+      changed_when: true

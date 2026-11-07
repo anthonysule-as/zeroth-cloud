@@ -1,0 +1,48 @@
+# Zeroth Cloud v3 — WireGuard Gateway Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Site: {{ site | upper }} | Host: {{ inventory_hostname }}
+# Public endpoint: {{ wg_gateway_a_public_ip if site == 'a' else wg_gateway_b_public_ip }}
+
+[Interface]
+Address    = {{ wg_address }}
+ListenPort = {{ wg_listen_port }}
+PrivateKey = {{ vault_wg_gateway_a_private_key if site == 'a' else vault_wg_gateway_b_private_key }}
+
+PostUp   = bash /etc/wireguard/iptables-isolation.sh
+PostDown = iptables -D FORWARD -i wg0 -o eth0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || true
+
+# ─── INFRASTRUCTURE PEERS ────────────────────────────────────────────────────
+# All infrastructure servers connect to this gateway with their overlay IPs.
+# Their public keys are stored in vault as vault_wg_host_public_key_<hostname>
+# No GENERATE_AND_ADD_TO_VAULT placeholders — only filled keys are included.
+{% for host in groups['all'] | difference(groups['wireguard_gateways']) %}
+{% if hostvars[host].wg_overlay_ip is defined %}
+{% set keyvar = 'vault_wg_host_public_key_' + host | replace('-', '_') %}
+{% if lookup('vars', keyvar, default='FILL_ME') != 'FILL_ME' %}
+[Peer]
+# {{ host }} ({{ hostvars[host].wg_overlay_ip }})
+PublicKey  = {{ lookup('vars', keyvar) }}
+AllowedIPs = {{ hostvars[host].wg_overlay_ip }}/32
+{% endif %}
+{% endif %}
+{% endfor %}
+
+# ─── ORG CLIENT PEERS ────────────────────────────────────────────────────────
+# Enrolled org peers added by enroll_org.yml — wg syncconf, no restart needed.
+{% for org in enrolled_orgs | default([]) %}
+[Peer]
+# Org {{ org.id }}: {{ org.name }}
+PublicKey  = {{ org.wg_public_key }}
+AllowedIPs = 10.{{ org.id }}.0.0/24
+{% endfor %}
+
+# --- ADMIN CLIENTS -----------------------------------------------------------
+# SOC analysts and admins connecting via WireGuard
+{% for client in admin_wg_clients | default([]) %}
+[Peer]
+# {{ client.name }}
+PublicKey  = {{ client.public_key }}
+AllowedIPs = {{ client.overlay_ip }}/32
+{% endfor %}

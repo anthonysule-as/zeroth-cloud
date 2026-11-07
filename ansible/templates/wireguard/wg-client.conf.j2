@@ -1,0 +1,21 @@
+# Zeroth Cloud v3 - WireGuard Client Config (infrastructure server)
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }} | Overlay IP: {{ wg_overlay_ip }}
+
+[Interface]
+Address    = {{ wg_overlay_ip }}/8
+PrivateKey = {{ lookup('vars', 'vault_wg_host_private_key_' + inventory_hostname | replace('-', '_')) }}
+
+# --- GATEWAY A - Site A (Primary) -------------------------------------------
+[Peer]
+PublicKey            = {{ vault_wg_gateway_a_public_key }}
+Endpoint             = {{ wg_gateway_a_public_ip }}:{{ wireguard_listen_port }}
+AllowedIPs           = <REDACTED_IP_2>/8
+PersistentKeepalive  = 25
+
+# --- GATEWAY B - Site B (Failover) ------------------------------------------
+[Peer]
+PublicKey            = {{ vault_wg_gateway_b_public_key }}
+Endpoint             = {{ wg_gateway_b_public_ip }}:{{ wireguard_listen_port }}
+AllowedIPs           = <REDACTED_IP_15>/32
+PersistentKeepalive  = 25

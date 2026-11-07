@@ -1,0 +1,22 @@
+<!-- Zeroth Cloud v3 — Wazuh Agent Group Config -->
+<!-- Org: {{ org_id_var | default(org_id) }} | Managed by Ansible -->
+<agent_config>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/auth.log</location>
+  </localfile>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/syslog</location>
+  </localfile>
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/dpkg.log</location>
+  </localfile>
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>21600</frequency>
+    <directories check_all="yes" realtime="yes">/etc</directories>
+    <directories check_all="yes">/usr/bin,/usr/sbin,/bin,/sbin</directories>
+  </syscheck>
+</agent_config>

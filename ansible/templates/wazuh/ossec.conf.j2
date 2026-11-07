@@ -1,0 +1,159 @@
+<ossec_config>
+
+  <global>
+    <jsonout_output>yes</jsonout_output>
+    <alerts_log>yes</alerts_log>
+    <logall>no</logall>
+    <logall_json>no</logall_json>
+    <email_notification>no</email_notification>
+    <smtp_server>localhost</smtp_server>
+    <email_from>wazuh@{{ inventory_hostname }}</email_from>
+    <email_to><REDACTED_EMAIL_2></email_to>
+    <email_maxperhour>12</email_maxperhour>
+    <email_log_source>alerts.log</email_log_source>
+    <agents_disconnection_time>10m</agents_disconnection_time>
+    <agents_disconnection_alert_time>0</agents_disconnection_alert_time>
+  </global>
+
+  <alerts>
+    <log_alert_level>3</log_alert_level>
+    <email_alert_level>12</email_alert_level>
+  </alerts>
+
+  <logging>
+    <log_format>plain</log_format>
+  </logging>
+
+  <remote>
+    <connection>secure</connection>
+    <port>{{ wazuh_manager_port }}</port>
+    <protocol>tcp</protocol>
+    <queue_size>131072</queue_size>
+  </remote>
+
+  <rootcheck>
+    <disabled>no</disabled>
+    <check_files>yes</check_files>
+    <check_trojans>yes</check_trojans>
+    <check_dev>yes</check_dev>
+    <check_sys>yes</check_sys>
+    <check_pids>yes</check_pids>
+    <check_ports>yes</check_ports>
+    <check_if>yes</check_if>
+    <frequency>43200</frequency>
+    <rootkit_files>etc/shared/rootkit_files.txt</rootkit_files>
+    <rootkit_trojans>etc/shared/rootkit_trojans.txt</rootkit_trojans>
+    <skip_nfs>yes</skip_nfs>
+  </rootcheck>
+
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>43200</frequency>
+    <scan_on_start>yes</scan_on_start>
+    <alert_new_files>yes</alert_new_files>
+    <auto_ignore frequency="10" timeframe="3600">no</auto_ignore>
+    <directories>/etc,/usr/bin,/usr/sbin</directories>
+    <directories>/bin,/sbin,/boot</directories>
+    <ignore>/etc/mtab</ignore>
+    <ignore>/etc/hosts.deny</ignore>
+    <ignore>/etc/mail/statistics</ignore>
+    <ignore>/etc/random-seed</ignore>
+    <ignore>/etc/random.seed</ignore>
+    <ignore>/etc/adjtime</ignore>
+    <ignore>/etc/httpd/logs</ignore>
+    <ignore>/etc/utmpx</ignore>
+    <ignore>/etc/wtmpx</ignore>
+    <ignore>/etc/rc.d/rc[0-6].d</ignore>
+    <ignore>/etc/ld.so.cache</ignore>
+    <ignore>/etc/aide.conf</ignore>
+    <ignore>/var/log/auth.log</ignore>
+    <ignore>/var/log/syslog</ignore>
+    <nodiff>/etc/ssl/private.key</nodiff>
+    <skip_nfs>yes</skip_nfs>
+    <skip_dev>yes</skip_dev>
+    <skip_proc>yes</skip_proc>
+    <skip_sys>yes</skip_sys>
+    <process_priority>10</process_priority>
+    <max_eps>100</max_eps>
+    <sync_enabled>yes</sync_enabled>
+    <sync_interval>5m</sync_interval>
+    <sync_response_timeout>30</sync_response_timeout>
+    <sync_queue_size>16384</sync_queue_size>
+  </syscheck>
+
+  <global>
+    <white_list>127.0.0.1</white_list>
+    <white_list>^localhost.localdomain$</white_list>
+    <white_list><REDACTED_IP_2>/8</white_list>
+  </global>
+
+  <ruleset>
+    <decoder_dir>ruleset/decoders</decoder_dir>
+    <rule_dir>ruleset/rules</rule_dir>
+    <rule_exclude>0215-policy_rules.xml</rule_exclude>
+    <list>etc/lists/audit-keys</list>
+    <list>etc/lists/amazon/aws-eventnames</list>
+    <list>etc/lists/security-eventchannel</list>
+  </ruleset>
+
+  <rule_test>
+    <enabled>yes</enabled>
+    <threads>1</threads>
+    <max_sessions>64</max_sessions>
+    <session_timeout>15m</session_timeout>
+  </rule_test>
+
+  <!-- NOTE: this block is currently NON-FUNCTIONAL. It points at 0.0.0.0 and at
+       Filebeat cert paths that no longer exist (Filebeat was removed - it
+       segfaults on Ubuntu 24.04 and was replaced by wazuh-forward.py). The
+       indexer-connector retries and logs warnings forever. It is reproduced
+       here only so this template matches the live managers; deploying without
+       it would silently delete it. Fix or remove it deliberately, not as a
+       side effect of a deploy. -->
+  <indexer>
+    <enabled>yes</enabled>
+    <hosts>
+      <host>https://0.0.0.0:9200</host>
+    </hosts>
+    <ssl>
+      <certificate_authorities>
+        <ca>/etc/filebeat/certs/root-ca.pem</ca>
+      </certificate_authorities>
+      <certificate>/etc/filebeat/certs/filebeat.pem</certificate>
+      <key>/etc/filebeat/certs/filebeat-key.pem</key>
+    </ssl>
+  </indexer>
+
+  <auth>
+    <disabled>no</disabled>
+    <port>{{ wazuh_registration_port }}</port>
+    <use_source_ip>no</use_source_ip>
+    <purge>yes</purge>
+    <!-- Agent enrollment is authenticated by CLIENT CERTIFICATE, not a password.
+         ssl_agent_ca makes authd demand a cert signed by the Zeroth Wazuh CA;
+         without one the TLS handshake fails before enrollment is attempted.
+         Do NOT set use_password back to yes without a decision to weaken this. -->
+    <use_password>no</use_password>
+    <ciphers>HIGH:!ADH:!EXP:!MD5:!RC4:!3DES:!CAMELLIA:@STRENGTH</ciphers>
+    <ssl_verify_host>no</ssl_verify_host>
+    <ssl_agent_ca>etc/rootCA.pem</ssl_agent_ca>
+    <ssl_manager_cert>etc/sslmanager.cert</ssl_manager_cert>
+    <ssl_manager_key>etc/sslmanager.key</ssl_manager_key>
+    <ssl_auto_negotiate>no</ssl_auto_negotiate>
+  </auth>
+
+  <cluster>
+    <name>zeroth-cloud</name>
+    <node_name>{{ inventory_hostname }}</node_name>
+    <node_type>{% if inventory_hostname == groups['wazuh_managers'][0] %}master{% else %}worker{% endif %}</node_type>
+    <key>{{ wazuh_cluster_key }}</key>
+    <port>1516</port>
+    <bind_addr>{{ wg_overlay_ip }}</bind_addr>
+    <nodes>
+      <node>{{ hostvars[groups['wazuh_managers'][0]]['wg_overlay_ip'] }}</node>
+    </nodes>
+    <hidden>no</hidden>
+    <disabled>no</disabled>
+  </cluster>
+
+</ossec_config>

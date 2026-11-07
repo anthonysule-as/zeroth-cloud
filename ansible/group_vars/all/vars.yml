@@ -1,0 +1,7 @@
+
+# Admin WireGuard clients (SOC analysts, admins)
+# These get added to both gateways and can reach all overlay servers
+admin_wg_clients:
+  - name: "analyst-windows"
+    public_key: "REDACTED_WG_KEY"
+    overlay_ip: "<REDACTED_IP_50>"

@@ -1,0 +1,31 @@
+---
+_meta:
+  type: "roles"
+  config_version: 2
+
+zeroth_reader:
+  reserved: false
+  cluster_permissions:
+  - "cluster_composite_ops_ro"
+  - "cluster:monitor/health"
+  index_permissions:
+  - index_patterns:
+    - "wazuh-alerts-*"
+    allowed_actions:
+    - "read"
+    - "search"
+    - "indices:admin/mappings/get"
+    - "indices:admin/get"
+
+zeroth_writer:
+  reserved: false
+  cluster_permissions:
+  - "cluster_composite_ops"
+  - "cluster:monitor/main"
+  index_permissions:
+  - index_patterns:
+    - "wazuh-alerts-*"
+    allowed_actions:
+    - "create_index"
+    - "crud"
+    - "indices:admin/mapping/put"

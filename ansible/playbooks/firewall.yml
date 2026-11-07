@@ -1,0 +1,64 @@
+---
+# Zeroth Cloud — SSH public allow-list + public ICMP restriction.
+# Codifies the live firewall hardening. Excludes jumpserver + wireguard_gateways.
+# ufw pattern mirrors haproxy.yml (community.general.ufw, additive).
+
+- name: SSH public allow-list
+  hosts: wazuh_managers:opensearch:analytics:llama:postgresql:tang:monitoring:haproxy:siteb_standby
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+  tasks:
+    - name: Allow SSH from each Zeroth public IP
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item.ip }}"
+        port: "22"
+        proto: tcp
+        comment: "zeroth-allowlist {{ item.c }}"
+      loop: "{{ zeroth_public_allowlist }}"
+
+    - name: Keep SSH from infrastructure overlay
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_2>/24"
+        port: "22"
+        proto: tcp
+        comment: "SSH from infrastructure overlay"
+
+    - name: Keep SSH from admin clients overlay
+      community.general.ufw:
+        rule: allow
+        from_ip: "<REDACTED_IP_4>/24"
+        port: "22"
+        proto: tcp
+        comment: "SSH from admin clients"
+
+    - name: Ensure ufw enabled (default-deny incoming)
+      community.general.ufw:
+        state: enabled
+
+- name: Public ICMP restriction
+  hosts: wazuh_managers:opensearch:analytics:llama:postgresql:tang:monitoring:haproxy:siteb_standby
+  become: true
+  tasks:
+    - name: Deploy ICMP restriction script
+      ansible.builtin.copy:
+        src: ../../files/firewall/zeroth-icmp.sh
+        dest: /usr/local/sbin/zeroth-icmp.sh
+        mode: "0750"
+
+    - name: Deploy ICMP restriction service
+      ansible.builtin.copy:
+        src: ../../files/firewall/zeroth-icmp.service
+        dest: /etc/systemd/system/zeroth-icmp.service
+        mode: "0644"
+      notify: Enable zeroth-icmp
+
+  handlers:
+    - name: Enable zeroth-icmp
+      ansible.builtin.systemd:
+        name: zeroth-icmp
+        enabled: true
+        state: started
+        daemon_reload: true

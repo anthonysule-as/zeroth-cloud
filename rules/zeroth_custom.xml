@@ -1,0 +1,181 @@
+<!-- Zeroth Cloud v3 — Custom Wazuh Detection Rules -->
+<!-- Managed by Ansible — DO NOT EDIT ON MANAGER DIRECTLY -->
+<!-- Push changes via: ansible-playbook ansible/playbooks/wazuh_managers.yml -->
+
+<group name="zeroth_cloud,">
+
+  <!-- ─── AUTHENTICATION ANOMALIES ─────────────────────────────────────────── -->
+
+  <rule id="100001" level="12">
+    <if_group>authentication_failed</if_group>
+    <same_source_ip />
+    <frequency>5</frequency>
+    <timeframe>60</timeframe>
+    <description>Brute force attack detected: 5+ auth failures from same IP in 60 seconds</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>brute_force,authentication,</group>
+  </rule>
+
+  <rule id="100002" level="14">
+    <if_rule>100001</if_rule>
+    <same_source_ip />
+    <frequency>20</frequency>
+    <timeframe>120</timeframe>
+    <description>Sustained brute force: 20+ failures in 2 minutes — possible credential stuffing</description>
+    <mitre>
+      <id>T1110.004</id>
+    </mitre>
+    <group>brute_force,authentication,high_severity,</group>
+  </rule>
+
+  <!-- ─── PRIVILEGE ESCALATION ──────────────────────────────────────────────── -->
+
+  <rule id="100010" level="13">
+    <if_group>sudo</if_group>
+    <match>sudo: </match>
+    <regex>COMMAND=.*(chmod|chown|passwd|visudo|sudoers|useradd|usermod)</regex>
+    <description>Suspicious sudo command: potential privilege escalation attempt</description>
+    <mitre>
+      <id>T1548.003</id>
+    </mitre>
+    <group>privilege_escalation,sudo,</group>
+  </rule>
+
+  <rule id="100011" level="15">
+    <if_group>syslog</if_group>
+    <regex>uid=0.*euid=0</regex>
+    <match>setuid</match>
+    <description>Setuid execution by root — possible rootkit or exploit activity</description>
+    <mitre>
+      <id>T1548.001</id>
+    </mitre>
+    <group>privilege_escalation,rootkit,high_severity,</group>
+  </rule>
+
+  <!-- ─── FILE INTEGRITY — CRITICAL PATHS ──────────────────────────────────── -->
+
+  <rule id="100020" level="12">
+    <if_group>syscheck</if_group>
+    <match>ossec: File '</match>
+    <regex>/(etc/passwd|etc/shadow|etc/sudoers|etc/crontab|etc/ssh/sshd_config)</regex>
+    <description>Critical system file modified: {{ "{{" }}file{{ "}}" }}</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>file_integrity,critical_files,</group>
+  </rule>
+
+  <rule id="100021" level="14">
+    <if_group>syscheck</if_group>
+    <match>ossec: File '</match>
+    <regex>/var/ossec/</regex>
+    <description>Wazuh agent files modified — possible agent tampering</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+    <group>file_integrity,defense_evasion,high_severity,</group>
+  </rule>
+
+  <!-- ─── NETWORK ANOMALIES ─────────────────────────────────────────────────── -->
+
+  <rule id="100030" level="10">
+    <if_group>firewall</if_group>
+    <match>BLOCK</match>
+    <same_source_ip />
+    <frequency>50</frequency>
+    <timeframe>60</timeframe>
+    <description>Port scan detected: 50+ blocked connections from same source IP</description>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+    <group>network,port_scan,</group>
+  </rule>
+
+  <rule id="100031" level="13">
+    <if_group>syslog</if_group>
+    <match>WireGuard</match>
+    <regex>Invalid MAC|Invalid handshake|Handshake for peer .* did not complete</regex>
+    <description>WireGuard handshake failure — possible tunnel tampering or replay attack</description>
+    <mitre>
+      <id>T1557</id>
+    </mitre>
+    <group>network,wireguard,vpn,</group>
+  </rule>
+
+  <!-- ─── MALWARE / PROCESS ANOMALIES ──────────────────────────────────────── -->
+
+  <rule id="100040" level="13">
+    <if_group>syslog</if_group>
+    <regex>execve.*(/tmp/|/dev/shm/|/run/shm/).*</regex>
+    <description>Execution from suspicious temporary directory — possible malware dropper</description>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+    <group>malware,execution,</group>
+  </rule>
+
+  <rule id="100041" level="14">
+    <if_group>syslog</if_group>
+    <regex>(curl|wget|fetch).*(|python|perl|bash|sh).*-[eE].*</regex>
+    <description>Download and execute pattern detected — possible initial access or C2</description>
+    <mitre>
+      <id>T1059.004</id>
+    </mitre>
+    <group>malware,execution,initial_access,</group>
+  </rule>
+
+  <!-- ─── PERSISTENCE ───────────────────────────────────────────────────────── -->
+
+  <rule id="100050" level="11">
+    <if_group>syscheck</if_group>
+    <regex>/(etc/cron|var/spool/cron|etc/systemd/system)/</regex>
+    <description>Cron or systemd unit file created or modified — check for persistence</description>
+    <mitre>
+      <id>T1053.003</id>
+    </mitre>
+    <group>persistence,cron,</group>
+  </rule>
+
+  <rule id="100051" level="13">
+    <if_group>syslog</if_group>
+    <match>systemctl</match>
+    <regex>enable.*\.service</regex>
+    <description>New systemd service enabled — verify it is authorized</description>
+    <mitre>
+      <id>T1543.002</id>
+    </mitre>
+    <group>persistence,systemd,</group>
+  </rule>
+
+  <!-- ─── CIVIL SOCIETY — HIGH-RISK SPECIFIC RULES ─────────────────────────── -->
+
+  <rule id="100060" level="15">
+    <if_group>web</if_group>
+    <regex>(pegasus|predator|finspy|nso|intellexa)</regex>
+    <description>Known commercial spyware indicator in web traffic</description>
+    <mitre>
+      <id>T1203</id>
+    </mitre>
+    <group>spyware,targeted_attack,high_severity,civil_society,</group>
+  </rule>
+
+  <rule id="100061" level="14">
+    <if_group>syslog</if_group>
+    <regex>iCloud.*backup|ADP.*enabled|Advanced Data Protection</regex>
+    <description>iCloud Advanced Data Protection status change detected on monitored device</description>
+    <group>configuration_change,civil_society,</group>
+  </rule>
+
+  <rule id="100062" level="13">
+    <if_group>syscheck</if_group>
+    <regex>/Library/Application Support/.*\.plist</regex>
+    <description>Unexpected plist modification on macOS — check for stalkerware persistence</description>
+    <mitre>
+      <id>T1543.001</id>
+    </mitre>
+    <group>persistence,macos,civil_society,</group>
+  </rule>
+
+</group>

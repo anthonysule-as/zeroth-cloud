@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Idempotent Wazuh API password rotation for a built-in user.
+# Tries NEW password first (already-rotated -> no-op); falls back to DEFAULT
+# to perform the rotation; fails loudly if neither works.
+# Secrets come from environment (WZ_NEW_PW), never argv.
+set -euo pipefail
+
+API="https://127.0.0.1:55000"
+USER_ID="$1"          # 1 = wazuh, 2 = wazuh-wui
+USERNAME="$2"         # wazuh | wazuh-wui
+DEFAULT_PW="$3"       # default password for this user
+
+# auth: echoes token ONLY on HTTP 200; empty otherwise.
+auth() {
+  local user="$1" pass="$2" body code
+  # capture body + http_code separately; token is raw JWT on 200
+  body="$(curl -sk -u "$user:$pass" -X POST \
+      "$API/security/user/authenticate?raw=true" \
+      -w $'\n%{http_code}' --max-time 8 2>/dev/null)" || return 0
+  code="${body##*$'\n'}"
+  token="${body%$'\n'*}"
+  if [ "$code" = "200" ] && [ -n "$token" ]; then
+    printf '%s' "$token"
+  fi
+}
+
+# 1. Already rotated? (new password authenticates)
+TOKEN="$(auth "$USERNAME" "$WZ_NEW_PW")"
+if [ -n "$TOKEN" ]; then
+  echo "noop: $USERNAME already uses the new password"
+  exit 0
+fi
+
+# 2. Default works? -> rotate
+TOKEN="$(auth "$USERNAME" "$DEFAULT_PW")"
+if [ -z "$TOKEN" ]; then
+  echo "ERROR: $USERNAME accepts neither new nor default password — manual check needed" >&2
+  exit 3
+fi
+
+CODE="$(curl -sk -o /dev/null -w '%{http_code}' -X PUT "$API/security/users/$USER_ID" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"password\":\"$WZ_NEW_PW\"}" --max-time 8)"
+if [ "$CODE" = "200" ]; then
+  echo "rotated: $USERNAME password changed"
+  exit 0
+fi
+echo "ERROR: PUT /security/users/$USER_ID returned $CODE" >&2
+exit 4

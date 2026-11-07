@@ -1,0 +1,61 @@
+# Zeroth Cloud v3 — OpenSearch Node Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# PUBLIC IP TOPOLOGY: binds to WireGuard overlay IP, not public IP.
+
+cluster.name: {{ opensearch_cluster_name }}
+node.name: {{ opensearch_node_name }}
+node.roles: {{ opensearch_node_roles | to_json }}
+
+path.data: {{ luks_mount_point }}/opensearch/data
+path.logs: {{ luks_mount_point }}/opensearch/logs
+
+# Bind to WireGuard overlay IP only — never the public IP
+network.host: {{ wg_overlay_ip }}
+path.repo: ["/data/backups/opensearch-snapshots"]
+http.port: {{ opensearch_http_port }}
+transport.port: {{ opensearch_transport_port }}
+
+# Discovery uses overlay IPs across all 3 nodes
+discovery.seed_hosts:
+{% for ip in opensearch_seed_hosts %}
+  - "{{ ip }}"
+{% endfor %}
+cluster.initial_cluster_manager_nodes:
+{% for host in groups['opensearch'] %}
+  - "{{ hostvars[host]['opensearch_node_name'] }}"
+{% endfor %}
+
+# TLS (transport + HTTP)
+plugins.security.ssl.transport.pemcert_filepath: /etc/opensearch/certs/node.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/opensearch/certs/node-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/opensearch/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/opensearch/certs/node.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/opensearch/certs/node-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/opensearch/certs/root-ca.pem
+plugins.security.allow_default_init_securityindex: true
+plugins.security.audit.type: internal_opensearch
+plugins.security.enable_snapshot_restore_privilege: true
+plugins.security.check_snapshot_restore_write_privileges: true
+
+bootstrap.memory_lock: true
+thread_pool.write.queue_size: 1000
+thread_pool.search.queue_size: 1000
+action.auto_create_index: ".opensearch-*,.opendistro*,wazuh-*"
+action.destructive_requires_name: true
+
+# Security plugin ENABLED 2026-08-27 (security-assessor #6/#9). Do not set this to true:
+# it disables authentication AND transport/HTTP TLS, reopening both findings.
+# Requires certs in /etc/opensearch/certs (root-ca.pem, node.pem, node-key.pem,
+# admin.pem, admin-key.pem) — see docs. Internal users/roles are seeded with
+# securityadmin.sh, not by this template.
+plugins.security.disabled: false
+
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU=Zeroth Cloud,O=Resilience Technologies,C=NG"
+plugins.security.nodes_dn:
+{% for h in groups['opensearch'] %}
+  - "CN={{ h }},OU=Zeroth Cloud,O=Resilience Technologies,C=NG"
+{% endfor %}
+plugins.security.restapi.roles_enabled: ["all_access"]

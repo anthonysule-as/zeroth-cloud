@@ -1,0 +1,99 @@
+# Zeroth Cloud v3 — HAProxy Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# PUBLIC IP TOPOLOGY
+
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    maxconn 100000
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    option  redispatch
+    retries 3
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    timeout check   5s
+
+# ─── STATS ───────────────────────────────────────────────────────────────────
+frontend stats
+    bind {{ wg_overlay_haproxy_a if site == 'a' else wg_overlay_haproxy_b }}:{{ haproxy_stats_port }}
+    mode http
+    stats enable
+    stats uri {{ haproxy_stats_uri }}
+    stats refresh 10s
+    stats auth admin:{{ vault_haproxy_stats_password }}
+
+# ─── WAZUH AGENT EVENTS ──────────────────────────────────────────────────────
+frontend wazuh_events
+    bind *:1514
+    # Dedicated org routing by source IP (auto-generated from inventory)
+{% for host in groups['wazuh_dedicated'] %}
+{% set org_id = hostvars[host]['wazuh_org_id'] %}
+    acl org{{ "%02d" | format(org_id) }}_src src 10.{{ org_id }}.0.0/24
+    use_backend wazuh_dedicated_org{{ "%02d" | format(org_id) }} if org{{ "%02d" | format(org_id) }}_src
+{% endfor %}
+    default_backend wazuh_shared_managers
+
+# ─── WAZUH AGENT REGISTRATION ────────────────────────────────────────────────
+frontend wazuh_registration
+    bind *:1515
+{% for host in groups['wazuh_dedicated'] %}
+{% set org_id = hostvars[host]['wazuh_org_id'] %}
+    acl org{{ "%02d" | format(org_id) }}_src src 10.{{ org_id }}.0.0/24
+    use_backend wazuh_reg_org{{ "%02d" | format(org_id) }} if org{{ "%02d" | format(org_id) }}_src
+{% endfor %}
+    default_backend wazuh_shared_managers
+
+# ─── DEDICATED ORG BACKENDS (auto-generated from inventory) ──────────────────
+{% for host in groups['wazuh_dedicated'] %}
+{% set org_id = hostvars[host]['wazuh_org_id'] %}
+{% set org_name = hostvars[host]['wazuh_org_name'] %}
+backend wazuh_dedicated_org{{ "%02d" | format(org_id) }}
+    server {{ host }} {{ hostvars[host]['wg_overlay_ip'] }}:1514 check inter 5s rise 2 fall 3
+
+backend wazuh_reg_org{{ "%02d" | format(org_id) }}
+    server {{ host }} {{ hostvars[host]['wg_overlay_ip'] }}:1515 check inter 5s rise 2 fall 3
+
+{% endfor %}
+# ─── WAZUH API ───────────────────────────────────────────────────────────────
+frontend wazuh_api
+    bind {{ wg_overlay_haproxy_a if site == 'a' else wg_overlay_haproxy_b }}:55000
+    default_backend wazuh_api_backend
+
+# ─── SHARED WAZUH MANAGER POOL ───────────────────────────────────────────────
+backend wazuh_shared_managers
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+{% for host in groups['wazuh_shared'] %}
+    server {{ host }} {{ hostvars[host]['wg_overlay_ip'] }}:1514 check inter 5s rise 2 fall 3
+{% endfor %}
+
+# ─── DEDICATED ORG BACKENDS (auto-generated from inventory) ──────────────────
+{% for host in groups['wazuh_dedicated'] %}
+{% set org_id = hostvars[host]['wazuh_org_id'] %}
+{% set org_name = hostvars[host]['wazuh_org_name'] %}
+backend wazuh_dedicated_org{{ "%02d" | format(org_id) }}
+    server {{ host }} {{ hostvars[host]['wg_overlay_ip'] }}:1514 check inter 5s rise 2 fall 3
+
+backend wazuh_reg_org{{ "%02d" | format(org_id) }}
+    server {{ host }} {{ hostvars[host]['wg_overlay_ip'] }}:1515 check inter 5s rise 2 fall 3
+
+{% endfor %}
+# ─── WAZUH API BACKEND ───────────────────────────────────────────────────────
+backend wazuh_api_backend
+    balance {{ haproxy_balance_algorithm }}
+    option tcp-check
+{% for host in groups['wazuh_managers'] %}
+    server {{ host }}-api {{ hostvars[host]['wg_overlay_ip'] }}:55000 check inter 5s rise 2 fall 3
+{% endfor %}

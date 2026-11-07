@@ -1,0 +1,184 @@
+---
+# Zeroth Cloud v3 — LUKS Loopback File Encryption
+# PUBLIC IP / SINGLE DISK TOPOLOGY
+#
+# Creates a LUKS-encrypted loopback file on the root filesystem.
+# All servers have a single sda disk — no separate data disk available.
+# Loopback LUKS is functionally identical to block device LUKS for services.
+#
+# File sizes by role:
+#   opensearch, postgresql, wazuh_managers: 80G
+#   wazuh_shared: 150G
+#   analytics: 400G
+#
+# Tang server (<REDACTED_IP_3>) must be reachable for automated unlock at boot.
+
+- name: Configure LUKS loopback encryption on data nodes
+  hosts: data_nodes
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  vars:
+    luks_file: /luks-data.img
+    luks_mapped_name: data_crypt
+    luks_mount_point: /data
+    # Size in MB — set per role
+    luks_file_size_mb: "{{ 409600 if inventory_hostname in groups['analytics']
+                          else 153600 if inventory_hostname in groups['wazuh_shared']
+                          else 40960 if inventory_hostname == 'llama-01'
+                          else 81920 }}"
+
+  tasks:
+
+    - name: Install LUKS and Clevis tools
+      ansible.builtin.apt:
+        name:
+          - cryptsetup
+          - cryptsetup-initramfs
+          - clevis
+          - clevis-luks
+          - clevis-initramfs
+        state: present
+        update_cache: true
+
+    - name: Check if LUKS file already exists
+      ansible.builtin.stat:
+        path: "{{ luks_file }}"
+      register: luks_file_stat
+
+    - name: Create LUKS loopback file
+      ansible.builtin.command:
+        cmd: "fallocate -l {{ luks_file_size_mb }}M {{ luks_file }}"
+      when: not luks_file_stat.stat.exists
+      register: luks_file_created
+
+    - name: Check if loopback file is already LUKS formatted
+      ansible.builtin.command:
+        cmd: "cryptsetup isLuks {{ luks_file }}"
+      register: luks_check
+      changed_when: false
+      failed_when: false
+
+    - name: Format loopback file with LUKS2
+      ansible.builtin.command:
+        cmd: >
+          cryptsetup luksFormat
+          --type luks2
+          --cipher aes-xts-plain64
+          --key-size 512
+          --hash sha512 --iter-time 1000 --iter-time 2000
+          --batch-mode
+          {{ luks_file }}
+      when: luks_check.rc != 0
+
+    - name: Bind LUKS to Tang server (network-bound unlock)
+      ansible.builtin.command:
+        cmd: >
+          clevis luks bind -f -d {{ luks_file }} tang
+          '{"url":"http://{{ wg_overlay_tang }}"}'
+      when: luks_check.rc != 0
+      register: tang_bind
+      failed_when:
+        - tang_bind.rc != 0
+        - "'already bound' not in tang_bind.stderr"
+
+    - name: Setup loop device for LUKS file
+      ansible.builtin.command:
+        cmd: "losetup -f {{ luks_file }} --show"
+      register: loop_device
+      changed_when: true
+      failed_when: loop_device.rc != 0
+
+    - name: Open LUKS device
+      ansible.builtin.command:
+        cmd: "clevis luks unlock -d {{ loop_device.stdout | trim }} -n {{ luks_mapped_name }}"
+      register: luks_open
+      failed_when:
+        - luks_open.rc != 0
+        - "'already exists' not in luks_open.stderr"
+      changed_when: luks_open.rc == 0
+
+    - name: Create ext4 filesystem on LUKS device
+      ansible.builtin.filesystem:
+        fstype: ext4
+        dev: "/dev/mapper/{{ luks_mapped_name }}"
+      when: luks_check.rc != 0
+
+    - name: Create mount point
+      ansible.builtin.file:
+        path: "{{ luks_mount_point }}"
+        state: directory
+        mode: "0750"
+
+    - name: Mount LUKS device
+      ansible.posix.mount:
+        path: "{{ luks_mount_point }}"
+        src: "/dev/mapper/{{ luks_mapped_name }}"
+        fstype: ext4
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Deploy LUKS unlock script for boot
+      ansible.builtin.copy:
+        dest: /usr/local/bin/zeroth-luks-unlock.sh
+        mode: "0700"
+        content: |
+          #!/bin/bash
+          # Zeroth Cloud — LUKS unlock at boot
+          # Called by systemd after network and WireGuard are up
+          LUKS_FILE="{{ luks_file }}"
+          MAPPED="{{ luks_mapped_name }}"
+          MOUNT="{{ luks_mount_point }}"
+          LOOP=$(losetup -j "$LUKS_FILE" | cut -d: -f1)
+          if [ -z "$LOOP" ]; then
+            LOOP=$(losetup -f "$LUKS_FILE" --show)
+          fi
+          if [ ! -e "/dev/mapper/$MAPPED" ]; then
+            clevis luks unlock -d "$LOOP" -n "$MAPPED"
+          fi
+          if ! mountpoint -q "$MOUNT"; then
+            mount /dev/mapper/$MAPPED $MOUNT
+          fi
+
+    - name: Deploy systemd service for LUKS unlock at boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/zeroth-luks.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Zeroth Cloud LUKS Data Volume Unlock
+          After=network-online.target wg-quick@wg0.service
+          Wants=network-online.target wg-quick@wg0.service
+          Before=opensearch.service postgresql.service wazuh-manager.service docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/zeroth-luks-unlock.sh
+          TimeoutStartSec=120
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable LUKS unlock service
+      ansible.builtin.systemd:
+        name: zeroth-luks.service
+        enabled: true
+        daemon_reload: true
+
+    - name: Verify /data is mounted
+      ansible.builtin.command:
+        cmd: mountpoint /data
+      changed_when: false
+
+    - name: Show /data disk usage
+      ansible.builtin.command:
+        cmd: df -h /data
+      register: data_df
+      changed_when: false
+
+    - name: Print /data status
+      ansible.builtin.debug:
+        msg: "{{ data_df.stdout }}"

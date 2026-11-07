@@ -1,0 +1,67 @@
+# Zeroth Cloud v3 — Alertmanager Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Routes: critical → Signal + PGP Email | warning → PGP Email only
+
+global:
+  resolve_timeout: 5m
+  smtp_from: "zeroth-alerts@{{ vault_alert_email_address }}"
+  smtp_smarthost: "smtp.{{ vault_alert_email_address | regex_replace('^.*@', '') }}:587"
+  smtp_auth_username: "{{ vault_alert_email_address }}"
+  smtp_auth_password: "{{ vault_smtp_password }}"
+  smtp_require_tls: true
+
+route:
+  group_by: ['alertname', 'component', 'instance']
+  group_wait:      30s
+  group_interval:  5m
+  repeat_interval: 4h
+  receiver: default-receiver
+
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: critical-receiver
+      repeat_interval: 1h
+      continue: true
+
+    - matchers:
+        - severity = warning
+      receiver: warning-receiver
+      repeat_interval: 6h
+
+receivers:
+
+  - name: default-receiver
+    email_configs:
+      - to: "{{ vault_alert_email_address }}"
+        send_resolved: true
+
+  - name: critical-receiver
+    # Signal notification via signal-cli sidecar
+    webhook_configs:
+      - url: "http://localhost:8080/signal-alert"
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: signal-cli
+            password: "{{ vault_jumpserver_secret_key | truncate(16, true, '') }}"
+    email_configs:
+      - to: "{{ vault_alert_email_address }}"
+        send_resolved: true
+        headers:
+          Subject: '[CRITICAL] Zeroth Cloud Alert: {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
+
+  - name: warning-receiver
+    email_configs:
+      - to: "{{ vault_alert_email_address }}"
+        send_resolved: true
+        headers:
+          Subject: '[WARNING] Zeroth Cloud Alert: {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
+
+inhibit_rules:
+  # If a node is down, suppress all other alerts from that node
+  - source_matchers:
+      - alertname = NodeDown
+    target_matchers:
+      - component != infrastructure
+    equal: [instance]

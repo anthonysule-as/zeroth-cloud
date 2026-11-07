@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Block committing any group_vars/all secrets file that isn't ansible-vault encrypted
+fail=0
+for f in $(git diff --cached --name-only | grep -E 'group_vars/all/(sec|secrets)\.yml$'); do
+  if [ -f "$f" ] && ! head -1 "$f" | grep -q '^\$ANSIBLE_VAULT'; then
+    echo "BLOCKED: $f is not ansible-vault encrypted. Encrypt before committing."
+    fail=1
+  fi
+done
+exit $fail

@@ -1,0 +1,12 @@
+[Unit]
+Description=Zeroth Cloud WireGuard gateway INPUT default-deny
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zeroth-gateway-input.sh
+
+[Install]
+WantedBy=multi-user.target

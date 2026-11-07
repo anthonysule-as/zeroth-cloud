@@ -1,0 +1,181 @@
+---
+# Zeroth Cloud v3 — Analytics Stack Playbook
+# Deploys TheHive 5 + Shuffle SOAR + MISP + Cortex via Docker Compose.
+# All data on LUKS-encrypted /data volume.
+
+- name: Deploy Analytics Stack
+  hosts: analytics
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Install Docker Engine
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com | bash
+      args:
+        creates: /usr/bin/docker
+
+    - name: Install Docker Compose plugin
+      ansible.builtin.apt:
+        name: docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Ensure docker.service.d drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Make Docker wait for WireGuard (overlay IP must exist before containers bind)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/10-wait-wireguard.conf
+        mode: "0644"
+        content: |
+          [Unit]
+          After=wg-quick@wg0.service
+          Wants=wg-quick@wg0.service
+      notify: Reload systemd daemon
+
+    - name: Create analytics data directories on LUKS volume
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - /data/thehive/data
+        - /data/thehive/logs
+        - /data/cassandra
+        - /data/shuffle/apps
+        - /data/shuffle/files
+        - /data/shuffle/database
+        - /data/misp/data
+        - /data/misp/logs
+        - /data/misp/config
+        - /data/misp/db
+        - /data/misp/redis
+        - /data/cortex/data
+        - /opt/zeroth-analytics/config/thehive
+        - /opt/zeroth-analytics/config/cortex
+        - /opt/zeroth-analytics/config/nginx
+
+    - name: Deploy docker-compose file
+      ansible.builtin.copy:
+        src: ../../docker/analytics-stack.yml
+        dest: /opt/zeroth-analytics/docker-compose.yml
+        mode: "0640"
+
+    - name: Deploy .env file with secrets
+      ansible.builtin.template:
+        src: ../templates/analytics/analytics.env.j2
+        dest: /opt/zeroth-analytics/.env
+        mode: "0644"
+
+    - name: Deploy TheHive application.conf
+      ansible.builtin.template:
+        src: ../templates/analytics/thehive-application.conf.j2
+        dest: /opt/zeroth-analytics/config/thehive/application.conf
+        mode: "0640"
+
+    - name: Deploy Cortex application.conf
+      ansible.builtin.template:
+        src: ../templates/analytics/cortex-application.conf.j2
+        dest: /opt/zeroth-analytics/config/cortex/application.conf
+        mode: "0640"
+
+    - name: Pull all analytics images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: /opt/zeroth-analytics
+
+    - name: Start analytics stack
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: /opt/zeroth-analytics
+
+    - name: Wait for TheHive to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ thehive_port }}/api/v1/status"
+        status_code: [200, 401]
+      register: thehive_status
+      retries: 30
+      delay: 10
+      until: thehive_status.status in [200, 401]
+
+    - name: Wait for Cortex to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ cortex_port }}/api/status"
+        status_code: [200, 401]
+      register: cortex_status
+      retries: 20
+      delay: 10
+      until: cortex_status.status == 200
+
+    - name: Allow analytics ports from management VLAN only
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ item }}"
+        proto: tcp
+        comment: "Analytics stack"
+      loop:
+        - "{{ thehive_port }}"
+        - "{{ cortex_port }}"
+        - "{{ shuffle_port }}"
+        - "8443"   # MISP HTTPS
+
+    - name: Enable Cortex analyzers via API
+      ansible.builtin.uri:
+        url: "http://localhost:{{ cortex_port }}/api/analyzer/{{ item }}/configuration"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ vault_cortex_admin_password }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          auto_extract_artifacts: true
+          configuration:
+            key: "{{ vault_virustotal_api_key if 'VirusTotal' in item else vault_abuseipdb_api_key }}"
+        status_code: [200, 201]
+      loop:
+        - VirusTotal_GetReport_3_1
+        - AbuseIPDB
+        - MalwareBazaar_SearchHashReport
+        - URLhaus_2_0
+      ignore_errors: true   # Some analyzers may already be configured
+
+# ── Docker-WireGuard Forwarding ──────────────────────────────────────────────
+# Allows Docker containers on analytics-01 to reach services on the
+# WireGuard overlay (OpenSearch, Wazuh managers, etc.)
+
+- name: Deploy Docker-WireGuard forwarding on analytics
+  hosts: analytics
+  become: true
+
+  tasks:
+
+    - name: Deploy zeroth-iptables rules script
+      ansible.builtin.copy:
+        src: ../../files/analytics/zeroth-iptables.sh
+        dest: /usr/local/sbin/zeroth-iptables.sh
+        mode: "0750"
+      notify: Enable Docker-WireGuard forwarding
+
+    - name: Deploy zeroth-iptables systemd service
+      ansible.builtin.copy:
+        src: ../../files/analytics/zeroth-iptables.service
+        dest: /etc/systemd/system/zeroth-iptables.service
+        mode: "0644"
+      notify: Enable Docker-WireGuard forwarding
+
+  handlers:
+
+    - name: Enable Docker-WireGuard forwarding
+      ansible.builtin.systemd:
+        name: zeroth-iptables
+        enabled: true
+        state: started
+        daemon_reload: true

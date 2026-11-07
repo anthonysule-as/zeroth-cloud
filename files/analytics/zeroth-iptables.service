@@ -1,0 +1,12 @@
+[Unit]
+Description=Zeroth Cloud Docker-WireGuard forwarding + public-block rules
+After=docker.service wg-quick@wg0.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zeroth-iptables.sh
+
+[Install]
+WantedBy=multi-user.target

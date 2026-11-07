@@ -1,0 +1,71 @@
+# Zeroth Cloud v3 — .gitignore
+# If it has a secret, a key, or a cert, it never goes in git.
+
+# ─── SECRETS ─────────────────────────────────────────────────────────────────
+# Vault-encrypted files ARE committed (they're ciphertext).
+# Plaintext secrets are NEVER committed.
+ansible/group_vars/all/secrets.yml.dec
+*.key
+*.pem
+*.p12
+*.pfx
+.vault_pass
+.zeroth_vault_pass
+*.vault_pass
+
+# ─── PKI — NEVER COMMIT ───────────────────────────────────────────────────────
+pki/
+*.crt
+*.csr
+ca/
+
+# ─── WIREGUARD KEYS ───────────────────────────────────────────────────────────
+*.private
+*_private.key
+wg-private*
+
+# ─── GENERATED OUTPUTS ───────────────────────────────────────────────────────
+ansible/output/
+# Org WireGuard client configs are generated dynamically and delivered securely
+# They must never be committed to the repository
+ansible/inventory/orgs/*.yml.bak
+
+# ─── PYTHON ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ─── ANSIBLE ─────────────────────────────────────────────────────────────────
+*.retry
+.ansible/
+ansible/.cache/
+
+# ─── EDITOR / OS ─────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# ─── LOGS ────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── GENERATED KEY FILES — NEVER COMMIT ──────────────────────────────────────
+wg_keys_GENERATED.txt
+*_GENERATED.txt
+*_GENERATED.yml
+ansible/output/
+ansible/inventory/orgs/*.yml
+# Wazuh PKI private keys — never commit (CA key = trust anchor)
+files/wazuh/pki/zeroth-wazuh-ca.key
+files/wazuh/pki/sslmanager.key
+files/wazuh/pki/*.srl
+
+# WireGuard client configs — contain private and preshared keys
+users/**/*.conf

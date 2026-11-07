@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+import json, time, sys, os, ssl, base64, urllib.request, urllib.error, urllib.parse
+from datetime import datetime, timezone
+ALERTS_FILE    = os.environ.get("WAZUH_ALERTS_FILE", "/var/ossec/logs/alerts/alerts.json")
+OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "https://{{ hostvars[groups['opensearch'][0]]['wg_overlay_ip'] }}:9200")
+OPENSEARCH_USER = os.environ.get("OPENSEARCH_USER", "{{ vault_opensearch_writer_user }}")
+OPENSEARCH_PASS = os.environ.get("OPENSEARCH_PASS", "{{ vault_opensearch_writer_password }}")
+OPENSEARCH_CA   = os.environ.get("OPENSEARCH_CA", "/etc/zeroth/opensearch-ca.pem")
+INDEX_PREFIX   = os.environ.get("WAZUH_INDEX_PREFIX", "wazuh-alerts-shared")
+STATE_FILE     = os.environ.get("WAZUH_FORWARD_STATE", "/var/lib/wazuh-forward/state.json")
+POLL_SECONDS   = float(os.environ.get("WAZUH_FORWARD_POLL", "2"))
+os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+SSL_CTX = ssl.create_default_context(cafile=OPENSEARCH_CA)
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            s = json.load(f); return int(s.get("inode", 0)), int(s.get("offset", 0))
+    except Exception:
+        return 0, 0
+def save_state(inode, offset):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f: json.dump({"inode": inode, "offset": offset}, f)
+    os.replace(tmp, STATE_FILE)
+def resolve_start(saved_inode, saved_offset):
+    st = os.stat(ALERTS_FILE); cur_inode = st.st_ino; cur_size = st.st_size
+    if saved_inode != cur_inode:
+        print(f"rotation detected (inode {saved_inode}->{cur_inode}); start 0", flush=True); return cur_inode, 0
+    if saved_offset > cur_size:
+        print(f"truncation detected (offset {saved_offset}>{cur_size}); start 0", flush=True); return cur_inode, 0
+    return cur_inode, saved_offset
+def alert_ts(a):
+    return a.get("timestamp") or (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+0000")
+def alert_id(a):
+    aid = a.get("id")
+    if aid: return str(aid)
+    return f"{a.get('timestamp','0')}-{a.get('rule',{}).get('id','0')}-{hash(json.dumps(a,sort_keys=True))&0xffffffff}"
+def index_for(ts):
+    try: day = ts[:10].replace("-", ".")
+    except Exception: day = datetime.now(timezone.utc).strftime("%Y.%m.%d")
+    return f"{INDEX_PREFIX}-{day}"
+def send_alert(a):
+    ts = alert_ts(a); a["@timestamp"] = ts
+    url = f"{OPENSEARCH_URL}/{index_for(ts)}/_doc/{urllib.parse.quote(alert_id(a), safe='')}"
+    auth = base64.b64encode(f"{OPENSEARCH_USER}:{OPENSEARCH_PASS}".encode()).decode()
+    req = urllib.request.Request(url, data=json.dumps(a).encode(), method="PUT",
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Basic {auth}"})
+    urllib.request.urlopen(req, timeout=10, context=SSL_CTX).read()
+inode, pos = load_state()
+inode, pos = resolve_start(inode, pos)
+print(f"Starting from inode {inode} position {pos}", flush=True)
+sent = 0; backoff = 1
+while True:
+    try:
+        inode, pos = resolve_start(inode, pos)
+        with open(ALERTS_FILE, "r") as f:
+            f.seek(pos)
+            while True:
+                line = f.readline()
+                if not line: break
+                pos = f.tell(); line = line.strip()
+                if not line: continue
+                try: a = json.loads(line)
+                except json.JSONDecodeError: continue
+                try:
+                    send_alert(a)
+                except (urllib.error.URLError, OSError) as e:
+                    print(f"send error, retry: {e}", file=sys.stderr, flush=True)
+                    pos -= len(line.encode()) + 1; save_state(inode, max(pos, 0))
+                    time.sleep(backoff); backoff = min(backoff*2, 30); break
+                sent += 1; backoff = 1; save_state(inode, pos)
+                if sent % 10 == 0: print(f"Forwarded {sent} alerts", flush=True)
+            else:
+                save_state(inode, pos)
+        time.sleep(POLL_SECONDS)
+    except FileNotFoundError:
+        print(f"{ALERTS_FILE} not found; waiting", file=sys.stderr, flush=True); time.sleep(5)
+    except Exception as e:
+        print(f"loop error: {e}", file=sys.stderr, flush=True); time.sleep(min(backoff, 30))

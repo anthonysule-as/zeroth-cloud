@@ -1,0 +1,207 @@
+name: zeroth-analytics
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    restart: unless-stopped
+    environment:
+      CASSANDRA_CLUSTER_NAME: zeroth
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+    volumes:
+    - /data/cassandra:/var/lib/cassandra
+    networks:
+    - analytics
+    healthcheck:
+      test:
+      - CMD
+      - cqlsh
+      - -e
+      - describe keyspaces
+      interval: 30s
+      timeout: 10s
+      retries: 10
+  thehive:
+    image: strangebee/thehive:5.6
+    container_name: thehive
+    restart: unless-stopped
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    environment:
+      TH_SECRET: '{{ vault_thehive_secret_key }}'
+      JVM_OPTS: >-
+        -Xms512m -Xmx1g
+        -Dplay.http.session.secure=false
+        -Dplay.http.session.httpOnly=false
+        -Dplay.http.session.sameSite=null
+        -Dplay.filters.disabled.0=play.filters.csrf.CSRFFilter
+        -Dplay.filters.disabled.1=play.filters.cors.CORSFilter
+    volumes:
+    - /data/thehive/data:/opt/thehive/data
+    - /data/thehive/logs:/opt/thehive/logs
+    - /opt/zeroth-analytics/config/thehive/application.conf:/etc/thehive/application.conf
+    - /opt/zeroth-analytics/config/thehive/certs:/opt/thehive/certs:ro
+    ports:
+    - <REDACTED_IP_10>:9000:9000
+    - <REDACTED_IP_10>:9443:9443
+    command: --no-config-secret
+    networks:
+    - analytics
+  shuffle-backend:
+    image: ghcr.io/shuffle/shuffle-backend:latest
+    container_name: shuffle-backend
+    restart: unless-stopped
+    environment:
+      SHUFFLE_APP_HOTLOAD_FOLDER: /shuffle-apps
+      SHUFFLE_FILE_LOCATION: /shuffle-files
+      SHUFFLE_OPENSEARCH_URL: http://shuffle-database:9200
+      SHUFFLE_ENCRYPTION_MODIFIER: '{{ vault_shuffle_encryption_key }}'
+      BACKEND_HOSTNAME: shuffle-backend
+      BACKEND_PORT: 5001
+      FRONTEND_URL: http://shuffle-frontend:3001
+      SHUFFLE_DEFAULT_USERNAME: '{{ vault_shuffle_admin_username }}'
+      SHUFFLE_DEFAULT_PASSWORD: '{{ vault_shuffle_admin_password }}'
+      SHUFFLE_DEFAULT_APIKEY: '{{ vault_shuffle_encryption_key }}'
+    volumes:
+    - /data/shuffle/apps:/shuffle-apps
+    - /data/shuffle/files:/shuffle-files
+    networks:
+    - analytics
+  shuffle-frontend:
+    image: ghcr.io/shuffle/shuffle-frontend:latest
+    container_name: shuffle-frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_HOSTNAME: shuffle-backend
+      BACKEND_PORT: 5001
+    ports:
+    - <REDACTED_IP_10>:3001:80
+    networks:
+    - analytics
+  shuffle-database:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: shuffle-database
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: '{{ vault_opensearch_admin_password }}'
+      DISABLE_INSTALL_DEMO_CONFIG: 'true'
+      DISABLE_SECURITY_PLUGIN: 'true'
+      discovery.type: single-node
+    volumes:
+    - /data/shuffle/database:/data
+    networks:
+    - analytics
+  misp:
+    image: ghcr.io/misp/misp-docker/misp-core:latest
+    container_name: misp
+    restart: unless-stopped
+    environment:
+      MISP_BASEURL: http://{{ wg_overlay_ip }}
+      MISP_EMAIL: <REDACTED_EMAIL_2>
+      MISP_ADMIN_EMAIL: <REDACTED_EMAIL_2>
+      MISP_ADMIN_PASSPHRASE: '{{ vault_misp_admin_password }}'
+      MYSQL_HOST: misp-db
+      MYSQL_DATABASE: misp
+      MYSQL_USER: misp
+      MYSQL_PASSWORD: ${MISP_DB_PASSWORD}
+      REDIS_FQDN: misp-redis
+    volumes:
+    - /data/misp/data:/var/www/MISP/app/files
+    - /data/misp/logs:/var/www/MISP/app/tmp/logs
+    - /data/misp/config:/var/www/MISP/app/Config
+    ports:
+    - <REDACTED_IP_10>:8080:80
+    depends_on:
+    - misp-db
+    - misp-redis
+    networks:
+    - analytics
+  misp-db:
+    image: mysql:8.0
+    container_name: misp-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MISP_DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: misp
+      MYSQL_USER: misp
+      MYSQL_PASSWORD: ${MISP_DB_PASSWORD}
+    volumes:
+    - /data/misp/db:/var/lib/mysql
+    networks:
+    - analytics
+  misp-redis:
+    image: redis:7-alpine
+    container_name: misp-redis
+    restart: unless-stopped
+    volumes:
+    - /data/misp/redis:/data
+    networks:
+    - analytics
+  cortex:
+    image: thehiveproject/cortex:4.1.0
+    container_name: cortex
+    restart: unless-stopped
+    environment:
+      JOB_DIRECTORY: /opt/cortex/jobs
+    volumes:
+    - /data/cortex/data:/opt/cortex/data
+    - /opt/zeroth-analytics/config/cortex/application.conf:/etc/cortex/application.conf:ro
+    ports:
+    - <REDACTED_IP_10>:9001:9001
+    networks:
+    - analytics
+    command: --es-uri http://cortex-es:9200 --secret REDACTED
+    depends_on:
+    - cortex-es
+  cortex-es:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: cortex-es
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+    - /data/cortex/elasticsearch:/usr/share/elasticsearch/data
+    networks:
+    - analytics
+  # shuffle-orborus — Shuffle SOAR workflow execution engine.
+  #
+  # STOPPED 2026-08-27 (security-assessor #1 / #17 remediation). Do not restore without
+  # the hardening below. History: this service was removed from the compose file
+  # but left running as an orphan from 2026-04-05, mounting /var/run/docker.sock
+  # read-write. It used that socket to respawn a Tenzir 4.25.0 node every ~10min
+  # with an unauthenticated API on 0.0.0.0:5160 — the exact CRITICAL finding
+  # security-assessor raised as #1. Removing the Tenzir container alone does not fix this;
+  # orborus recreates it.
+  #
+  # To restore (testing session), read this first:
+  #   1. SHUFFLE_SKIP_PIPELINES=true is MANDATORY — without it orborus recreates
+  #      the Tenzir node with an unauthenticated API on 0.0.0.0:5160 (security-assessor #1).
+  #   2. Orborus needs Docker to launch workflow workers. A socket proxy does NOT
+  #      make this safe: CONTAINERS+POST permits creating a privileged container
+  #      with / bind-mounted, i.e. root on the host (this is why security-assessor #17 was
+  #      only 'reduced' by the proxy and why the proxy was removed entirely).
+  #      Decide the isolation model BEFORE restoring — e.g. a dedicated Docker
+  #      host for workers, or rootless Docker, or accept and document the risk.
+  #
+  # shuffle-orborus:
+  #   image: ghcr.io/shuffle/shuffle-orborus:latest
+  #   container_name: shuffle-orborus
+  #   restart: unless-stopped
+  #   environment:
+  #     SHUFFLE_APP_SDK_VERSION: latest
+  #     SHUFFLE_ORBORUS_EXECUTION_TIMEOUT: "600"
+  #     ENVIRONMENT_NAME: Shuffle
+  #     BASE_URL: http://shuffle-backend:5001
+  #     DOCKER_API_VERSION: "1.4"
+  #     CLEANUP: "true"
+  #     SHUFFLE_SKIP_PIPELINES: "true"
+  #   networks:
+  #   - analytics
+
+networks:
+
+  analytics:
+    driver: bridge

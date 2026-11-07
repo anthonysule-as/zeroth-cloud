@@ -1,0 +1,235 @@
+---
+# Zeroth Cloud v3 — Global Variables
+# Public-IP topology: no private management VLAN.
+# All inter-server traffic uses WireGuard overlay (<REDACTED_IP_2>/8) once deployed.
+# During bootstrap phase only, servers are reachable on their public IPs.
+#
+# FILL IN before first run:
+#   controller_public_ip      — public IP of jumpserver-01 (your Ansible controller)
+#   wg_gateway_a_public_ip    — public IP of wg-gateway-a (Site A)
+#   wg_gateway_b_public_ip    — public IP of wg-gateway-b (Site B)
+#   haproxy_public_ip         — public IP of haproxy-site-a (active node)
+
+# ─── PROJECT ────────────────────────────────────────────────────────────────
+project_name: zeroth-cloud
+project_org: "Resilience Technologies Limited"
+
+# ─── NETWORK TOPOLOGY ────────────────────────────────────────────────────────
+# Public IPs — fill in your actual values
+controller_public_ip:     "<REDACTED_IP_47>"   # jumpserver-01 public IP (Ansible controller)
+wg_gateway_a_public_ip:  "<REDACTED_IP_29>"   # wg-gateway-a public IP (Site A WireGuard endpoint)
+wg_gateway_b_public_ip:  "<REDACTED_IP_39>"   # wg-gateway-b public IP (Site B WireGuard endpoint)
+haproxy_public_ip:        "<REDACTED_IP_45>"   # haproxy-site-a public IP (active HAProxy node)
+
+# Management plane — WireGuard overlay replaces private VLAN
+# All inter-server service traffic (OpenSearch, PostgreSQL, Wazuh API, etc.)
+# travels over this overlay once WireGuard is deployed.
+# During bootstrap only, servers accept SSH from controller_public_ip.
+wireguard_overlay_cidr: "<REDACTED_IP_2>/8"
+
+# SSH access control — applied by bootstrap.sh and UFW playbook tasks
+# Only the Ansible controller may SSH to any server after bootstrap.
+ssh_allowed_from: "{{ controller_public_ip }}"
+
+# ─── WIREGUARD ───────────────────────────────────────────────────────────────
+wireguard_listen_port: 51820
+# Org subnet allocation: each org gets a dedicated /24
+# <REDACTED_IP_6>/24 → org 1 ... <REDACTED_IP_49>/24 → org 255
+# Supports up to 255 orgs with no architecture change.
+wireguard_base_network:        "<REDACTED_IP_2>/8"
+wireguard_org_subnet_template: "10.{{ org_id }}.0.0/24"
+
+# WireGuard overlay IPs for infrastructure nodes (post-WireGuard deployment)
+# These are the IPs services bind to once the overlay is up.
+# <REDACTED_IP_2>/24 is reserved for infrastructure — orgs start at <REDACTED_IP_6>/24
+wg_overlay_jumpserver:   "<REDACTED_IP_14>"
+wg_overlay_haproxy_a:    "<REDACTED_IP_5>"
+wg_overlay_haproxy_b:    "<REDACTED_IP_15>"
+wg_overlay_opensearch_1: "<REDACTED_IP_8>"
+wg_overlay_opensearch_2: "<REDACTED_IP_16>"
+wg_overlay_opensearch_3: "<REDACTED_IP_17>"
+wg_overlay_analytics:    "<REDACTED_IP_10>"
+wg_overlay_llama:        "<REDACTED_IP_11>"
+wg_overlay_postgresql:   "<REDACTED_IP_9>"
+wg_overlay_monitoring:   "<REDACTED_IP_12>"
+wg_overlay_tang:         "<REDACTED_IP_3>"
+
+# ─── LUKS / TANG ─────────────────────────────────────────────────────────────
+# Tang is accessed over the WireGuard overlay — never the public internet
+tang_server_url:   "http://{{ wg_overlay_tang }}"
+luks_data_device:  /dev/sdb
+luks_mapped_name:  data_crypt
+luks_mount_point:  /data
+
+# ─── OPENSEARCH ──────────────────────────────────────────────────────────────
+opensearch_version:       "2.19.6"
+opensearch_http_port:     9200
+opensearch_transport_port: 9300
+opensearch_java_opts: "-Xms3g -Xmx3g"
+opensearch_ilm_hot_days:  30
+opensearch_ilm_warm_days: 90
+opensearch_index_prefix:  "wazuh-alerts"
+opensearch_seed_hosts:
+  - "{{ wg_overlay_opensearch_1 }}"
+  - "{{ wg_overlay_opensearch_2 }}"
+  - "{{ wg_overlay_opensearch_3 }}"
+
+# ─── WAZUH ───────────────────────────────────────────────────────────────────
+wazuh_version:            "4.14.7"
+wazuh_manager_port:       1514
+wazuh_registration_port:  1515
+wazuh_api_port:           55000
+wazuh_cluster_port:       1516
+wg_infra_subnet:          "<REDACTED_IP_2>/24"   # infrastructure hosts only
+wazuh_rules_dir:          /var/ossec/etc/rules
+wazuh_shared_config_dir:  /var/ossec/etc/shared
+
+# ─── HAPROXY ─────────────────────────────────────────────────────────────────
+haproxy_stats_port:              8404
+haproxy_stats_uri:               /stats
+haproxy_balance_algorithm:       leastconn
+haproxy_health_check_interval:   5s
+haproxy_health_check_rise:       2
+haproxy_health_check_fall:       3
+
+# ─── JUMPSERVER ──────────────────────────────────────────────────────────────
+jumpserver_port:             443
+jumpserver_ssh_proxy_port:   2222
+jumpserver_version:          "v4.0.2"
+jumpserver_session_recording: true
+jumpserver_mfa_enforce:      true
+
+# ─── LLAMA ───────────────────────────────────────────────────────────────────
+llama_model:          "meta-llama/Llama-3.1-8B-Instruct"
+llama_quantization:   awq
+llama_port:           8000
+llama_max_model_len:  8192
+# Llama binds to WireGuard overlay IP — never public
+llama_bind_address:   "{{ wg_overlay_llama }}"
+
+# ─── POSTGRESQL ──────────────────────────────────────────────────────────────
+postgresql_version:  "16"
+postgresql_port:     5432
+postgresql_data_dir: /data/postgresql
+
+# ─── THEHIVE / SHUFFLE / MISP / CORTEX ───────────────────────────────────────
+thehive_port:  9000
+thehive_version: "5.6"
+shuffle_port:  3001
+misp_port:     443
+cortex_port:   9001
+
+# ─── GRAFANA ─────────────────────────────────────────────────────────────────
+grafana_port:    3000
+grafana_version: "10.4.0"
+
+# ─── PROMETHEUS ──────────────────────────────────────────────────────────────
+prometheus_port:      9090
+alertmanager_port:    9093
+prometheus_scrape_interval: 30s
+prometheus_retention: 30d
+
+# Alert thresholds
+prometheus_alert_wazuh_silence_minutes: 5
+prometheus_alert_disk_usage_pct:        80
+prometheus_alert_llama_latency_seconds: 10
+prometheus_alert_wireguard_down_minutes: 2
+prometheus_alert_ingestion_drop_pct:    50
+
+# ─── DISASTER RECOVERY ───────────────────────────────────────────────────────
+dr_rto_hours:          2
+dr_rpo_hours:          4
+dr_backup_schedule:    "0 2 * * *"
+dr_backup_destination: "/data/backups"
+opensearch_snapshot_repo: "zeroth-snapshots"
+
+# ─── NOTIFICATIONS ───────────────────────────────────────────────────────────
+notification_channels:
+  - signal
+  - pgp_email
+wazuh_cluster_key: "{{ vault_wazuh_cluster_key }}"
+
+# Admin WireGuard clients (SOC analysts, admins)
+admin_wg_clients:
+  - name: "analyst-windows"
+    public_key: "REDACTED_WG_KEY"
+    overlay_ip: "<REDACTED_IP_50>"
+
+# TheHive admin API key (generated 2026-04-03)
+
+# Shuffle webhook URL for Wazuh integration
+shuffle_wazuh_webhook: "http://<REDACTED_IP_10>:3001/api/v1/hooks/webhook_REDACTED_WEBHOOK_ID"
+
+# TheHive API keys
+thehive_admin_api_key: "REDACTED"
+thehive_analyst_api_key: "REDACTED"
+
+# Cortex
+cortex_admin_api_key: "REDACTED"
+
+# ═══ Per-Org Isolation Mapping ═══
+# Used by iptables-isolation.sh.j2 on WireGuard gateways
+# Add new orgs here as they enroll — run the wireguard playbook to apply
+wg_overlay_haproxy: "<REDACTED_IP_5>"
+wg_admin_subnet: "<REDACTED_IP_4>/24"
+
+zeroth_orgs:
+  # Tier 1 — Dedicated Managers
+  - { id: org01, subnet: "<REDACTED_IP_6>/24",  wazuh_manager_ip: "<REDACTED_IP_13>", wazuh_manager_name: "wazuh-mgr-01", tier: dedicated }
+  - { id: org02, subnet: "<REDACTED_IP_7>/24",  wazuh_manager_ip: "<REDACTED_IP_30>", wazuh_manager_name: "wazuh-mgr-02", tier: dedicated }
+  - { id: org03, subnet: "<REDACTED_IP_23>/24",  wazuh_manager_ip: "<REDACTED_IP_31>", wazuh_manager_name: "wazuh-mgr-03", tier: dedicated }
+  - { id: org04, subnet: "<REDACTED_IP_25>/24",  wazuh_manager_ip: "<REDACTED_IP_32>", wazuh_manager_name: "wazuh-mgr-04", tier: dedicated }
+  - { id: org05, subnet: "<REDACTED_IP_26>/24",  wazuh_manager_ip: "<REDACTED_IP_33>", wazuh_manager_name: "wazuh-mgr-05", tier: dedicated }
+  - { id: org06, subnet: "<REDACTED_IP_27>/24",  wazuh_manager_ip: "<REDACTED_IP_34>", wazuh_manager_name: "wazuh-mgr-06", tier: dedicated }
+  # Tier 2 — Shared Managers (6 orgs per manager)
+  - { id: org07, subnet: "<REDACTED_IP_24>/24",  wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org08, subnet: "<REDACTED_IP_51>/24",  wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org09, subnet: "<REDACTED_IP_52>/24",  wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org10, subnet: "<REDACTED_IP_53>/24", wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org11, subnet: "<REDACTED_IP_54>/24", wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org12, subnet: "<REDACTED_IP_28>/24", wazuh_manager_ip: "<REDACTED_IP_18>", wazuh_manager_name: "wazuh-shared-01", tier: shared }
+  - { id: org13, subnet: "<REDACTED_IP_55>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org14, subnet: "<REDACTED_IP_56>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org15, subnet: "<REDACTED_IP_57>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org16, subnet: "<REDACTED_IP_58>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org17, subnet: "<REDACTED_IP_59>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org18, subnet: "<REDACTED_IP_60>/24", wazuh_manager_ip: "<REDACTED_IP_35>", wazuh_manager_name: "wazuh-shared-02", tier: shared }
+  - { id: org19, subnet: "<REDACTED_IP_61>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org20, subnet: "<REDACTED_IP_62>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org21, subnet: "<REDACTED_IP_63>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org22, subnet: "<REDACTED_IP_64>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org23, subnet: "<REDACTED_IP_65>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org24, subnet: "<REDACTED_IP_66>/24", wazuh_manager_ip: "<REDACTED_IP_36>", wazuh_manager_name: "wazuh-shared-03", tier: shared }
+  - { id: org25, subnet: "<REDACTED_IP_67>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+  - { id: org26, subnet: "<REDACTED_IP_68>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+  - { id: org27, subnet: "<REDACTED_IP_69>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+  - { id: org28, subnet: "<REDACTED_IP_70>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+  - { id: org29, subnet: "<REDACTED_IP_71>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+  - { id: org30, subnet: "<REDACTED_IP_72>/24", wazuh_manager_ip: "<REDACTED_IP_37>", wazuh_manager_name: "wazuh-shared-04", tier: shared }
+
+# ── Zeroth server public IPs — SSH + ICMP allow-list (single source of truth) ──
+zeroth_public_allowlist:
+  - { ip: "<REDACTED_IP_73>",  c: "llama-01" }
+  - { ip: "<REDACTED_IP_46>",   c: "haproxy-site-b" }
+  - { ip: "<REDACTED_IP_74>", c: "wazuh-mgr-06" }
+  - { ip: "<REDACTED_IP_75>", c: "wazuh-mgr-05" }
+  - { ip: "<REDACTED_IP_39>", c: "wg-gateway-b" }
+  - { ip: "<REDACTED_IP_76>",  c: "standby-rebuild-01" }
+  - { ip: "<REDACTED_IP_77>",   c: "wazuh-shared-01" }
+  - { ip: "<REDACTED_IP_78>",   c: "wazuh-mgr-03" }
+  - { ip: "<REDACTED_IP_79>",   c: "wazuh-mgr-02" }
+  - { ip: "<REDACTED_IP_80>",   c: "analytics-01" }
+  - { ip: "<REDACTED_IP_81>",   c: "postgresql-01" }
+  - { ip: "<REDACTED_IP_82>",   c: "wazuh-mgr-04" }
+  - { ip: "<REDACTED_IP_83>",   c: "wazuh-mgr-01" }
+  - { ip: "<REDACTED_IP_29>",   c: "wg-gateway-a" }
+  - { ip: "<REDACTED_IP_84>",   c: "wazuh-shared-02" }
+  - { ip: "<REDACTED_IP_45>",   c: "haproxy-site-a" }
+  - { ip: "<REDACTED_IP_47>",   c: "jumpserver-01" }
+  - { ip: "<REDACTED_IP_85>",   c: "wazuh-shared-03" }
+  - { ip: "<REDACTED_IP_86>",   c: "opensearch-01" }
+  - { ip: "<REDACTED_IP_87>",   c: "wazuh-shared-04" }
+  - { ip: "<REDACTED_IP_88>",   c: "opensearch-03" }
+  - { ip: "<REDACTED_IP_89>",   c: "opensearch-02" }
+  - { ip: "<REDACTED_IP_90>",    c: "monitoring-01" }
+  - { ip: "<REDACTED_IP_91>",    c: "tang-01" }

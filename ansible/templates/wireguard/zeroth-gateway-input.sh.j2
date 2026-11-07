@@ -1,0 +1,46 @@
+#!/bin/bash
+# Zeroth Cloud — WireGuard gateway INPUT default-deny.
+# Managed by Ansible — DO NOT EDIT MANUALLY.
+#
+# The gateways do not run ufw (package is in 'rc' state; its chains are empty
+# orphans). Before this, INPUT policy was ACCEPT with no filtering at all —
+# node_exporter on 0.0.0.0:9100 was reachable from the internet.
+#
+# 51820/udp MUST stay open to the world: WireGuard clients connect from
+# arbitrary public IPs. Closing it drops every org and analyst off the overlay.
+set -u
+
+OVERLAY="{{ wireguard_overlay_cidr }}"
+INFRA="{{ wg_infra_subnet | default('<REDACTED_IP_2>/24') }}"
+ADMIN="{{ wg_admin_subnet | default('<REDACTED_IP_4>/24') }}"
+JUMPSERVER="{{ hostvars[groups['jumpserver'][0]]['ansible_host'] }}"
+MONITORING="{{ hostvars[groups['monitoring'][0]]['ansible_host'] }}"
+
+add() { iptables -C "$@" 2>/dev/null || iptables -A "$@"; }
+
+# --- always-permit, added BEFORE the policy flip ---
+add INPUT -i lo -j ACCEPT
+add INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+add INPUT -i wg0 -j ACCEPT
+add INPUT -p udp --dport 51820 -j ACCEPT
+
+# --- SSH: Zeroth hosts + overlay management ranges ---
+{% for e in zeroth_public_allowlist %}
+add INPUT -s {{ e.ip }} -p tcp --dport 22 -j ACCEPT   # {{ e.c }}
+{% endfor %}
+add INPUT -s "${INFRA}" -p tcp --dport 22 -j ACCEPT
+add INPUT -s "${ADMIN}" -p tcp --dport 22 -j ACCEPT
+
+# --- node_exporter: monitoring only (security-assessor #16) ---
+add INPUT -s "${MONITORING}" -p tcp --dport 9100 -j ACCEPT
+add INPUT -s "${OVERLAY}"    -p tcp --dport 9100 -j ACCEPT
+
+# --- ICMP echo: jumpserver + overlay only ---
+add INPUT -s "${JUMPSERVER}" -p icmp -m icmp --icmp-type 8 -j ACCEPT
+add INPUT -s "${OVERLAY}"    -p icmp -m icmp --icmp-type 8 -j ACCEPT
+add INPUT                    -p icmp -m icmp --icmp-type 8 -j DROP
+
+# --- policy flip LAST, only once the accepts are in place ---
+iptables -P INPUT DROP
+
+exit 0

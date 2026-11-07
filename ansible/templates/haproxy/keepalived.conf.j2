@@ -1,0 +1,57 @@
+# Zeroth Cloud v3 — Keepalived Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Topology: Public IPs only
+#
+# NOTE: In a public-IP-only colo without Layer 2 adjacency between sites,
+# Keepalived VRRP cannot float a VIP between Site A and Site B.
+# Keepalived here provides LOCAL failover only (e.g. if HAProxy process dies
+# on Site A, it restarts automatically).
+#
+# Cross-site failover is handled by DNS: your DNS record for the Wazuh
+# endpoint should have a low TTL (60s). If Site A goes down, update the
+# DNS record to point to Site B's HAProxy public IP.
+# This is automated in the dr_failover.sh script.
+#
+# If your colo supports BGP/anycast, replace this with BGP-based failover.
+
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+    notification_email {
+        {{ vault_alert_email_address }}
+    }
+    smtp_server 127.0.0.1
+    smtp_connect_timeout 30
+}
+
+# Check that HAProxy process is alive
+vrrp_script check_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight   -20
+    fall     2
+    rise     1
+}
+
+# Local VRRP instance — provides automatic HAProxy restart monitoring
+# Both sites run MASTER to their own local VIP (their own public IP)
+vrrp_instance ZEROTH_LOCAL {
+    state  MASTER
+    interface eth0
+    virtual_router_id {{ 51 if site == 'a' else 52 }}
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass {{ vault_keepalived_auth_pass }}
+    }
+    virtual_ipaddress {
+        {{ haproxy_public_ip }}/32
+    }
+    track_script {
+        check_haproxy
+    }
+    notify_master "/etc/keepalived/notify.sh MASTER {{ inventory_hostname }}"
+    notify_fault  "/etc/keepalived/notify.sh FAULT {{ inventory_hostname }}"
+}

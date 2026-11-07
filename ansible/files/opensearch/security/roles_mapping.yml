@@ -1,0 +1,19 @@
+---
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+
+all_access:
+  reserved: true
+  backend_roles:
+  - "admin"
+
+zeroth_reader:
+  reserved: false
+  backend_roles:
+  - "zeroth_reader"
+
+zeroth_writer:
+  reserved: false
+  backend_roles:
+  - "zeroth_writer"

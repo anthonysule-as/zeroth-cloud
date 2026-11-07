@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+MODEL_URL="https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH="/opt/llama/models/llama-3.1-8b-instruct-q4_k_m.gguf"
+echo "Downloading Llama 3.1 8B Instruct Q4_K_M (~4.7GB)..."
+wget -q --show-progress -O "${MODEL_PATH}" "${MODEL_URL}"
+echo "Model downloaded: $(ls -lh ${MODEL_PATH})"

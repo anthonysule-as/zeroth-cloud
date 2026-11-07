@@ -1,0 +1,16 @@
+# Zeroth Cloud v3 — OpenSearch JVM Options
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Heap = 50% of available RAM, max 31g
+
+-Xms{{ [((ansible_memtotal_mb * 0.5) | int), 31744] | min }}m
+-Xmx{{ [((ansible_memtotal_mb * 0.5) | int), 31744] | min }}m
+
+-XX:+UseG1GC
+-XX:G1ReservePercent=25
+-XX:InitiatingHeapOccupancyPercent=30
+-Djava.io.tmpdir=/data/opensearch/tmp
+-XX:+DisableExplicitGC
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath=/data/opensearch/logs/
+-Dio.netty.tryReflectionSetAccessible=true
+-Djdk.attach.allowAttachSelf=true

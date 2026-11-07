@@ -1,0 +1,12 @@
+[Unit]
+Description=Zeroth Cloud — public ICMP echo-request restriction
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zeroth-icmp.sh
+
+[Install]
+WantedBy=multi-user.target

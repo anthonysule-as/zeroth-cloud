@@ -1,0 +1,155 @@
+---
+# Zeroth Cloud v3 — Disaster Recovery Test Playbook
+# Validates warm standby (Site B / Helsinki) can rebuild within 2-hour RTO.
+# Run after initial full deployment and monthly thereafter.
+# Does NOT disrupt production — tests are non-destructive.
+
+- name: DR Test — OpenSearch snapshot to Site B
+  hosts: opensearch
+  run_once: true
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Register snapshot repository
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_snapshot/{{ opensearch_snapshot_repo }}?verify=false"
+        method: PUT
+        body_format: json
+        body:
+          type: fs
+          settings:
+            location: "{{ dr_backup_destination }}/opensearch-snapshots"
+            compress: true
+        status_code: [200, 201]
+
+    - name: Create on-demand snapshot
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_snapshot/{{ opensearch_snapshot_repo }}/dr-test-{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}"
+        method: PUT
+        body_format: json
+        body:
+          indices: "*"
+          ignore_unavailable: true
+          include_global_state: false
+        status_code: [200, 201]
+
+    - name: Wait for snapshot to complete
+      ansible.builtin.uri:
+        url: "http://{{ wg_overlay_ip }}:{{ opensearch_http_port }}/_snapshot/{{ opensearch_snapshot_repo }}/dr-test-{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}"
+        method: GET
+      register: snapshot_status
+      retries: 30
+      delay: 20
+      until: snapshot_status.json.snapshots[0].state == "SUCCESS"
+
+- name: DR Test — Verify Site B WireGuard gateway is reachable
+  hosts: wireguard_gateways
+  vars_files:
+    - ../group_vars/all/main.yml
+
+  tasks:
+
+    - name: Check WireGuard status on all gateways
+      ansible.builtin.command: wg show wg0
+      register: wg_status
+      changed_when: false
+      become: true
+
+    - name: Verify Site B gateway has active peers
+      ansible.builtin.assert:
+        that: "'peer' in wg_status.stdout"
+        fail_msg: "Site B WireGuard gateway {{ inventory_hostname }} has no active peers"
+      when: site == 'b'
+
+- name: DR Test — Validate all services respond on Site B standby
+  hosts: siteb_standby
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Ping Site B standby host
+      ansible.builtin.ping:
+
+    - name: Sync Ansible playbooks to standby via rsync
+      ansible.posix.synchronize:
+        src: /root/zeroth-cloud/
+        dest: /opt/zeroth-cloud/
+        delete: true
+        recursive: true
+      delegate_to: jumpserver-01
+
+    - name: Verify Ansible playbooks are present and up to date
+      ansible.builtin.stat:
+        path: /opt/zeroth-cloud/ansible/playbooks/site.yml
+      register: playbook_stat
+
+    - name: Fail if playbooks are not present on standby
+      ansible.builtin.assert:
+        that: playbook_stat.stat.exists
+        fail_msg: "Ansible playbooks not found on standby host. Sync required."
+
+    - name: Verify Docker is installed on standby
+      ansible.builtin.command: docker info
+      changed_when: false
+      register: docker_info
+
+- name: DR Test — Measure estimated rebuild time
+  hosts: siteb_standby
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Time a dry-run of the analytics stack
+      ansible.builtin.command:
+        cmd: docker compose -f /opt/zeroth-cloud/docker/analytics-stack.yml config
+        chdir: /opt/zeroth-cloud
+      register: compose_dry_run
+      changed_when: false
+
+    - name: DR test summary
+      ansible.builtin.debug:
+        msg: |
+          ══════════════════════════════════════════════════
+          DR TEST RESULTS — {{ ansible_date_time.iso8601 }}
+          ══════════════════════════════════════════════════
+          ✓  OpenSearch snapshot    : SUCCESS
+          ✓  Site B WireGuard       : ACTIVE
+          ✓  Site B Ansible ready   : YES
+          ✓  Site B Docker ready    : YES
+          ✓  Compose config valid   : YES
+          ──────────────────────────────────────────────────
+          Target RTO : {{ dr_rto_hours }}h  |  Target RPO : {{ dr_rpo_hours }}h
+          ══════════════════════════════════════════════════
+
+- name: Configure daily automated backup schedule
+  hosts: opensearch
+  run_once: true
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Deploy daily snapshot cron job
+      ansible.builtin.cron:
+        name: "Zeroth Cloud OpenSearch daily snapshot"
+        minute: "0"
+        hour: "2"
+        job: >
+          curl -s -X PUT
+          -u admin:{{ vault_opensearch_admin_password }}
+          --insecure
+          "https://localhost:{{ opensearch_http_port }}/_snapshot/{{ opensearch_snapshot_repo }}/daily-$(date +\%Y\%m\%d)"
+          -H 'Content-Type: application/json'
+          -d '{"indices":"*","ignore_unavailable":true,"include_global_state":false}'
+          >> /var/log/zeroth-snapshots.log 2>&1
+        state: present

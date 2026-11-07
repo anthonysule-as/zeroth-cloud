@@ -1,0 +1,103 @@
+# Zeroth Cloud v3 — JumpServer v4 Docker Compose
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Version: {{ jumpserver_version }}
+
+name: zeroth-jumpserver
+
+services:
+
+  db:
+    image: mysql:8.0
+    container_name: jms_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ vault_jumpserver_db_password }}"
+      MYSQL_DATABASE: jumpserver
+      MYSQL_USER: jumpserver
+      MYSQL_PASSWORD: "{{ vault_jumpserver_db_password }}"
+    volumes:
+      - /data/jumpserver/mysql:/var/lib/mysql
+    networks:
+      - jumpserver
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: jms_redis
+    restart: unless-stopped
+    command: redis-server --requirepass "{{ vault_jumpserver_redis_password }}"
+    volumes:
+      - /data/jumpserver/redis:/data
+    networks:
+      - jumpserver
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  core:
+    image: jumpserver/jms_core:{{ jumpserver_version }}
+    container_name: jms_core
+    restart: unless-stopped
+    env_file: /opt/jumpserver/.env
+    volumes:
+      - /data/jumpserver/data:/opt/jumpserver/data
+      - /data/jumpserver/logs:/opt/jumpserver/logs
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - jumpserver
+
+  koko:
+    image: jumpserver/jms_koko:{{ jumpserver_version }}
+    container_name: jms_koko
+    restart: unless-stopped
+    env_file: /opt/jumpserver/.env
+    volumes:
+      - /data/jumpserver/data:/opt/jumpserver/data
+    ports:
+      - "{{ jumpserver_ssh_proxy_port }}:2222"
+    depends_on:
+      - core
+    networks:
+      - jumpserver
+
+  chen:
+    image: jumpserver/jms_chen:{{ jumpserver_version }}
+    container_name: jms_chen
+    restart: unless-stopped
+    env_file: /opt/jumpserver/.env
+    depends_on:
+      - core
+    networks:
+      jumpserver:
+        aliases:
+          - lion    # jms_web nginx.conf still references 'lion' — alias chen as lion
+
+  web:
+    image: jumpserver/jms_web:{{ jumpserver_version }}
+    container_name: jms_web
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - /data/jumpserver/data:/opt/jumpserver/data
+      - /data/jumpserver/nginx:/etc/nginx/conf.d
+    depends_on:
+      - core
+      - chen
+    networks:
+      - jumpserver
+
+networks:
+  jumpserver:
+    driver: bridge

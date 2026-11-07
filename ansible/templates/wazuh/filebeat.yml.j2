@@ -1,0 +1,18 @@
+filebeat.inputs:
+- type: log
+  enabled: true
+  paths:
+    - /var/ossec/logs/alerts/alerts.json
+  json.keys_under_root: true
+  json.add_error_key: true
+
+output.elasticsearch:
+  hosts:
+{% for host in groups['opensearch'] %}
+    - "http://{{ hostvars[host]['wg_overlay_ip'] }}:{{ opensearch_http_port }}"
+{% endfor %}
+  index: "wazuh-alerts-{{ wazuh_org_label | default('shared') }}-%{+yyyy.MM.dd}"
+
+setup.template.name: "wazuh"
+setup.template.pattern: "wazuh-*"
+setup.ilm.enabled: false

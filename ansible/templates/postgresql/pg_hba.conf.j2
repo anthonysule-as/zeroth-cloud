@@ -1,0 +1,18 @@
+# Zeroth Cloud v3 — PostgreSQL Client Authentication
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# PUBLIC IP TOPOLOGY: connections permitted from WireGuard overlay only.
+# PostgreSQL binds to the overlay IP — never the public IP.
+
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             postgres                                peer
+local   all             all                                     md5
+
+# WireGuard overlay — analytics, llama, Wazuh services on <REDACTED_IP_2>/8
+host    thehive         thehive         {{ wireguard_overlay_cidr }}    scram-sha-256
+host    misp            misp            {{ wireguard_overlay_cidr }}    scram-sha-256
+host    zeroth_rag      llama_rag       {{ wireguard_overlay_cidr }}    scram-sha-256
+host    zeroth_ioc      misp            {{ wireguard_overlay_cidr }}    scram-sha-256
+
+# Reject all other connections — including from public IPs
+host    all             all             0.0.0.0/0               reject
+host    all             all             ::/0                    reject

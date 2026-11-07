@@ -1,0 +1,38 @@
+# Zeroth Cloud v3 — vLLM Systemd Service
+# Managed by Ansible — DO NOT EDIT MANUALLY
+
+[Unit]
+Description=Zeroth Cloud — Llama 3.1 8B vLLM Inference Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data/models
+Environment="HF_HOME=/data/models/.cache"
+Environment="VLLM_WORKER_MULTIPROC_METHOD=spawn"
+
+ExecStart=/opt/vllm/bin/python -m vllm.entrypoints.openai.api_server \
+  --model /data/models/llama-3.1-8b-awq \
+  --quantization awq \
+  --max-model-len {{ llama_max_model_len }} \
+  --host {{ llama_bind_address }} \
+  --port {{ llama_port }} \
+  --served-model-name llama-3.1-8b \
+  --max-num-seqs 8 \
+  --disable-log-requests
+
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/data/models
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

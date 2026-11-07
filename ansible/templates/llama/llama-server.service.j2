@@ -1,0 +1,20 @@
+[Unit]
+Description=Llama.cpp Server - Zeroth Cloud AI Engine
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama/llama.cpp
+ExecStart=/opt/llama/llama.cpp/build/bin/llama-server \
+  --model /opt/llama/models/llama-3.1-8b-instruct-q4_k_m.gguf \
+  --host {{ wg_overlay_ip }} \
+  --port {{ llama_port }} \
+  --ctx-size 4096 \
+  --threads {{ ansible_processor_vcpus | default(4) }} \
+  --n-predict 512
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

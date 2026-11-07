@@ -1,0 +1,99 @@
+# Zeroth Cloud v3 — Ubuntu 24.04 Autoinstall (cloud-init preseed)
+# Used with PXE netboot for zero-touch OS installation at scale.
+# Place on your PXE/HTTP server and reference in your GRUB config.
+#
+# BEFORE USE: Replace FILL_ME values and set your SSH public key.
+
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  network:
+    version: 2
+    ethernets:
+      eth0:
+        dhcp4: false
+        addresses:
+          - FILL_ME/24          # Set per-server static IP e.g. FILL_ME/24
+        gateway4: FILL_ME_COLO_GATEWAY_IP
+        nameservers:
+          addresses: [8.8.8.8, 1.1.1.1]
+
+  storage:
+    layout:
+      name: lvm
+    config:
+      - type: disk
+        id: disk-sda
+        ptable: gpt
+        wipe: superblock-recursive
+        grub_device: true
+      - type: partition
+        id: part-efi
+        device: disk-sda
+        size: 512M
+        flag: boot
+        grub_device: true
+      - type: partition
+        id: part-boot
+        device: disk-sda
+        size: 1G
+      - type: partition
+        id: part-lvm
+        device: disk-sda
+        size: -1       # Rest of OS disk
+      - type: lvm_volgroup
+        id: vg-main
+        name: vg-main
+        devices: [part-lvm]
+      - type: lvm_partition
+        id: lv-root
+        name: root
+        volgroup: vg-main
+        size: 50G
+      - type: lvm_partition
+        id: lv-var
+        name: var
+        volgroup: vg-main
+        size: -1
+      # NOTE: /dev/sdb (data disk) is left unpartitioned — LUKS applied by Ansible
+
+  identity:
+    hostname: FILL_ME    # Set per-server e.g. wazuh-mgr-01
+    username: root
+    password: "!"         # Disabled password — SSH key only
+
+  ssh:
+    install-server: true
+    authorized-keys:
+      - "FILL_ME_WITH_zeroth_deploy_pubkey"
+    allow-pw: false
+
+  packages:
+    - openssh-server
+    - python3
+    - python3-pip
+    - curl
+    - git
+    - vim
+    - tmux
+    - ufw
+    - fail2ban
+    - net-tools
+
+  user-data:
+    disable_root: false    # root login required for Ansible
+
+  late-commands:
+    # Enable root SSH with key auth
+    - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
+    # Copy authorized_keys to root
+    - mkdir -p /target/root/.ssh
+    - cp /target/home/ubuntu/.ssh/authorized_keys /target/root/.ssh/authorized_keys || true
+    - chmod 700 /target/root/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys
+    # Signal bootstrap is needed
+    - echo "ZEROTH_CLOUD_NEEDS_BOOTSTRAP=1" >> /target/etc/environment

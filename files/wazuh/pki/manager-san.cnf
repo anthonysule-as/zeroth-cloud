@@ -1,0 +1,16 @@
+[req]
+distinguished_name = dn
+req_extensions = v3_req
+prompt = no
+[dn]
+C = US
+O = Zeroth Cloud
+CN = Zeroth Wazuh Manager
+[v3_req]
+subjectAltName = @alt
+[alt]
+IP.1 = <REDACTED_IP_5>
+IP.2 = <REDACTED_IP_15>
+IP.3 = <REDACTED_IP_45>
+IP.4 = <REDACTED_IP_46>
+DNS.1 = wazuh-manager

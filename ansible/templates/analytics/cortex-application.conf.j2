@@ -1,0 +1,22 @@
+# Zeroth Cloud v3 — Cortex Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+
+play.http.secret.key = "{{ vault_cortex_secret_key }}"
+
+search {
+  index = cortex
+  uri = "http://{{ hostvars[groups['opensearch'][0]]['wg_overlay_ip'] }}:{{ opensearch_http_port }}"
+}
+
+auth {
+  provider = [local]
+}
+
+job {
+  runner = [docker]
+}
+
+docker.container {
+  capAdd = []
+  capDrop = [all]
+}

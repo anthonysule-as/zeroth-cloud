@@ -1,0 +1,36 @@
+- name: Scope public ICMP echo in ufw before.rules
+  hosts: "{{ target | default('none') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Backup before.rules
+      ansible.builtin.copy:
+        src: /etc/ufw/before.rules
+        dest: /etc/ufw/before.rules.bak-icmp-20260827
+        remote_src: true
+        force: false
+
+    - name: Replace blanket echo-request accept with scoped rules
+      ansible.builtin.replace:
+        path: /etc/ufw/before.rules
+        regexp: '^-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT$'
+        replace: |-
+          # zeroth-icmp-scoped: public echo restricted (security-assessor hardening)
+          -A ufw-before-input -s <REDACTED_IP_47> -p icmp --icmp-type echo-request -j ACCEPT
+          -A ufw-before-input -s <REDACTED_IP_2>/8 -p icmp --icmp-type echo-request -j ACCEPT
+          -A ufw-before-input -p icmp --icmp-type echo-request -j DROP
+      register: icmp_edit
+
+    - name: Reload ufw
+      ansible.builtin.command: ufw reload
+      when: icmp_edit.changed
+      changed_when: true
+
+    - name: Verify drop rule is present
+      ansible.builtin.shell: iptables -S ufw-before-input | grep -c 'icmp-type 8 -j DROP'
+      register: v
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: drop_rules={{ v.stdout }}"

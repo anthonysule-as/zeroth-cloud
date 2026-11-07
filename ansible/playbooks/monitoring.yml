@@ -1,0 +1,217 @@
+---
+# Zeroth Cloud v3 — Prometheus + Alertmanager + Grafana Playbook
+# Self-monitoring layer: who watches the watchers?
+# Scrapes all components. Routes alerts to Signal + PGP email.
+
+- name: Deploy Monitoring Stack
+  hosts: monitoring
+  become: true
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/secrets.yml
+
+  tasks:
+
+    - name: Create monitoring directories on LUKS volume
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - /data/prometheus
+        - /data/alertmanager
+        - /data/grafana
+        - /etc/prometheus
+        - /etc/alertmanager
+
+    - name: Install Prometheus
+      ansible.builtin.apt:
+        name: prometheus
+        state: present
+        update_cache: true
+
+    - name: Create Prometheus secrets directory (security-assessor #6 — no plaintext creds in config)
+      ansible.builtin.file:
+        path: /etc/prometheus/secrets
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: "0700"
+
+    - name: Write OpenSearch scrape password to a protected file
+      ansible.builtin.copy:
+        content: "{{ vault_opensearch_admin_password }}"
+        dest: /etc/prometheus/secrets/opensearch.pw
+        owner: prometheus
+        group: prometheus
+        mode: "0600"
+      no_log: true
+      notify: Reload Prometheus
+
+    - name: Ensure /etc/zeroth exists for the OpenSearch CA
+      ansible.builtin.file:
+        path: /etc/zeroth
+        state: directory
+        mode: "0755"
+
+    - name: Deploy the Zeroth OpenSearch CA (for scrape TLS verification)
+      ansible.builtin.copy:
+        src: ../files/opensearch/root-ca.pem
+        dest: /etc/zeroth/opensearch-ca.pem
+        mode: "0644"
+      notify: Reload Prometheus
+
+    - name: Deploy Prometheus configuration
+      ansible.builtin.template:
+        src: ../templates/monitoring/prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        mode: "0644"
+      notify: Reload Prometheus
+
+    - name: Deploy Prometheus alert rules
+      ansible.builtin.template:
+        src: ../templates/monitoring/alert_rules.yml.j2
+        dest: /etc/prometheus/alert_rules.yml
+        mode: "0644"
+      notify: Reload Prometheus
+
+    - name: Install Alertmanager
+      ansible.builtin.apt:
+        name: prometheus-alertmanager
+        state: present
+
+    - name: Deploy Alertmanager configuration
+      ansible.builtin.template:
+        src: ../templates/monitoring/alertmanager.yml.j2
+        dest: /etc/alertmanager/alertmanager.yml
+        mode: "0600"   # Contains Signal + SMTP credentials
+      notify: Restart Alertmanager
+
+    - name: Install musl (Grafana dependency)
+      ansible.builtin.apt:
+        name: musl
+        state: present
+
+    - name: Add Grafana GPG key
+      ansible.builtin.shell:
+        cmd: wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
+        creates: /usr/share/keyrings/grafana.key
+
+    - name: Add Grafana apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/grafana.key] https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+
+    - name: Install Grafana
+      ansible.builtin.apt:
+        name: grafana
+        state: present
+        update_cache: true
+
+    - name: Deploy Grafana configuration
+      ansible.builtin.template:
+        src: ../templates/monitoring/grafana.ini.j2
+        dest: /etc/grafana/grafana.ini
+        mode: "0640"
+        owner: root
+        group: grafana
+      notify: Restart Grafana
+
+    - name: Deploy Grafana datasource provisioning
+      ansible.builtin.template:
+        src: ../templates/monitoring/grafana-datasources.yml.j2
+        dest: /usr/share/grafana/conf/provisioning/datasources/zeroth.yml
+        mode: "0640"
+        owner: root
+        group: grafana
+      notify: Restart Grafana
+
+    - name: Deploy Grafana dashboard provisioning config
+      ansible.builtin.copy:
+        src: ../templates/monitoring/grafana-dashboards-provisioning.yml
+        dest: /usr/share/grafana/conf/provisioning/dashboards/zeroth.yaml
+        mode: "0640"
+        owner: root
+        group: grafana
+      notify: Restart Grafana
+
+    - name: Ensure Grafana dashboards dir exists
+      ansible.builtin.file:
+        path: /data/grafana/dashboards
+        state: directory
+        owner: grafana
+        group: grafana
+        mode: "0750"
+
+    - name: Remove any stale/unrendered files from dashboards dir
+      ansible.builtin.shell: >
+        find /data/grafana/dashboards -maxdepth 1 -type f
+        ! -name 'zeroth-*.json' -delete
+      changed_when: false
+
+    - name: Render per-org Grafana dashboards
+      ansible.builtin.template:
+        src: ../../grafana/dashboards/org-template.json.j2
+        dest: "/data/grafana/dashboards/zeroth-{{ item.id }}.json"
+        owner: grafana
+        group: grafana
+        mode: "0640"
+      loop: "{{ zeroth_orgs }}"
+      loop_control:
+        label: "{{ item.id }}"
+      vars:
+        org_name: "{{ item.id }}"
+        org_id: "{{ item.subnet.split('.')[1] }}"
+        risk_tier: "{{ item.tier | default('shared') }}"
+      notify: Restart Grafana
+
+    - name: Enable and start Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        enabled: true
+        state: started
+
+    - name: Enable and start Alertmanager
+      ansible.builtin.systemd:
+        name: prometheus-alertmanager
+        enabled: true
+        state: started
+
+    - name: Enable and start Grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        enabled: true
+        state: started
+
+    - name: Allow Grafana from management VLAN
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ grafana_port }}"
+        proto: tcp
+        comment: "Grafana"
+
+    - name: Allow Prometheus from management VLAN
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ wireguard_overlay_cidr }}"
+        port: "{{ prometheus_port }}"
+        proto: tcp
+        comment: "Prometheus"
+
+  handlers:
+    - name: Reload Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: reloaded
+
+    - name: Restart Alertmanager
+      ansible.builtin.systemd:
+        name: prometheus-alertmanager
+        state: restarted
+
+    - name: Restart Grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
